@@ -8,8 +8,8 @@ A reviewer who did not write the change. When agents do the work, the reviewer i
 
 ## What the reviewer checks
 
-1. **It does what it says.** Read the diff against the pull request's description. Anything the description does not mention is a finding.
-2. **It is correct.** Follow the changed code through its callers and its failure paths. Run the tests that cover it.
+1. **It does what it says.** Read the diff against the pull request's description. Say so when the change does something the description does not mention; whether that blocks is decided by the test below.
+2. **It is correct.** Follow the changed code through its callers and its failure paths. Run the tests that cover it. For a change to settings or to prose, where there are no callers or tests, check instead that it says what is true and that what reads it will accept it.
 3. **It is safe in the risk areas it touches.** The gate's summary lists each risk area and why it matters. Check that reason specifically.
 4. **It can be undone.** Say how the change would be reversed if it turned out wrong. If it cannot be, say so.
 
@@ -29,7 +29,7 @@ or
 <!-- independent-review sha=<head commit> verdict=findings -->
 ```
 
-Below the marker, in plain words: what was checked, and each blocking finding with the file and line.
+Below the marker, in plain words: what was checked, each blocking finding with the file and line, then any remarks that do not block, and how the change would be undone. A pass has the same shape, with no blocking findings. If the record is posted from the same login as the author's, say so in it.
 
 Rules the gate enforces:
 

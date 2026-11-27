@@ -60,7 +60,7 @@ gh api "repos/OWNER/REPO/commits?sha=BRANCH&per_page=30" --jq '.[].sha' |
   while read sha; do echo "$sha $(gh api repos/OWNER/REPO/commits/$sha/pulls --jq 'length')"; done
 ```
 
-A commit with `0` beside it did not come from a pull request.
+A commit with `0` beside it did not come from a pull request. The repository's very first commit always shows `0`: it cannot come from a pull request, and it is not a gap.
 
 - Ready: every recent commit came from a pull request, or the exceptions are a named automation whose commits the owner can explain.
 - Gap: people or agents push to the default branch. Say how many of the 30.

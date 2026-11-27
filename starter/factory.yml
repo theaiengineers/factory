@@ -4,7 +4,7 @@
 # How to fill it in:   https://github.com/theaiengineers/factory/blob/main/docs/SETUP.md
 
 spec: factory/0.1
-factory: CHANGE-your-organisation
+factory: CHANGE-your-organisation       # a name for the group of repositories run this way; the organisation's name will do
 building: CHANGE-your-organisation/your-repository
 branch: main            # CHANGE if your releasing branch has another name
 
@@ -41,5 +41,5 @@ risk:
     why: CHANGE changes or deletes what customers have stored; a mistake cannot be undone
     paths: [CHANGE/migrations/**]
   - area: release tooling
-    why: builds and releases everything else, with credentials that can write to production
+    why: CHANGE builds and releases everything else, with credentials that can write to production
     paths: [.github/workflows/**]

@@ -92,7 +92,11 @@ class Decision(unittest.TestCase):
         state, description = review_gate.decide(HIGH, HEAD, [comment(marker() + "\nNothing blocking.")])
         self.assertEqual(state, "success")
         self.assertIn("process control, not proof", description)
-        self.assertIn("| payments | `api/billing/charge.py` | api/billing/** |", review_gate.summary(HIGH, state, description, HEAD))
+        text = review_gate.summary(HIGH, state, description, HEAD)
+        self.assertIn("| payments | `api/billing/charge.py` | api/billing/** | %s |" % HIGH["reasons"][0].get("why", ""), text)
+        # The reviewer is told why each area matters (the standard's third check relies on it), on one line.
+        told = {**HIGH, "reasons": [{"area": "pay|ments", "file": "a.py", "rule": "a*", "why": "moves money;\na mistake | charges customers"}]}
+        self.assertIn("| pay\\|ments | `a.py` | a* | moves money; a mistake \\| charges customers |", review_gate.summary(told, state, description, HEAD))
 
     def test_a_record_written_before_the_head_commit_existed_is_not_counted(self):
         early, late = comment(marker(), 1), comment(marker(), 30)

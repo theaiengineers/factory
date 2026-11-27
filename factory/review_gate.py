@@ -200,13 +200,18 @@ def _fit(text: str, areas: str | None = None) -> str:
     return text if len(text) <= DESCRIPTION_LIMIT else text[:DESCRIPTION_LIMIT - 1] + "…"
 
 
+def _cell(text) -> str:
+    """Text for one cell of the summary's table: one line, and a bar in it does not start a new cell."""
+    return " ".join(str(text).split()).replace("|", chr(92) + "|")
+
+
 def summary(tier: dict, state: str, description: str, head_sha: str, standard: str | None = None) -> str:
     lines = [f"## independent-review: {state}", "", description, "", f"Head commit `{head_sha}`.", ""]
     how = ["", f"The standard, and how to record a review: `{standard}`."] if standard else []
     level = tier["review"]
     if level == risk.HIGH:
-        lines += ["| Area | File | Rule that matched |", "| --- | --- | --- |"]
-        lines += [f"| {r['area']} | `{r['file']}` | {r['rule'].replace('|', chr(92) + '|')} |" for r in tier["reasons"]]
+        lines += ["| Area | File | Rule that matched | Why it matters |", "| --- | --- | --- | --- |"]
+        lines += [f"| {_cell(r['area'])} | `{r['file']}` | {_cell(r['rule'])} | {_cell(r.get('why', ''))} |" for r in tier["reasons"]]
         lines += how
     elif level == risk.CODE:
         code = tier.get("code", [])
