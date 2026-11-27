@@ -200,18 +200,30 @@ def _fit(text: str, areas: str | None = None) -> str:
     return text if len(text) <= DESCRIPTION_LIMIT else text[:DESCRIPTION_LIMIT - 1] + "…"
 
 
+def _cell(text) -> str:
+    """Text for one cell of the summary's table: one line, and a bar in it does not start a new cell."""
+    return " ".join(str(text).split()).replace("|", chr(92) + "|")
+
+
+def _name(path) -> str:
+    """A file's name as a code span that it cannot leave. The name is the one thing here that the pull request's
+    author chooses: a backtick in it would end the span, and a bar would start a new cell and push the area's
+    reason out of its column."""
+    return "`" + _cell(path).replace("`", "'") + "`"
+
+
 def summary(tier: dict, state: str, description: str, head_sha: str, standard: str | None = None) -> str:
     lines = [f"## independent-review: {state}", "", description, "", f"Head commit `{head_sha}`.", ""]
     how = ["", f"The standard, and how to record a review: `{standard}`."] if standard else []
     level = tier["review"]
     if level == risk.HIGH:
-        lines += ["| Area | File | Rule that matched |", "| --- | --- | --- |"]
-        lines += [f"| {r['area']} | `{r['file']}` | {r['rule'].replace('|', chr(92) + '|')} |" for r in tier["reasons"]]
+        lines += ["| Area | File | Rule that matched | Why it matters |", "| --- | --- | --- | --- |"]
+        lines += [f"| {_cell(r['area'])} | {_name(r['file'])} | {_cell(r['rule'])} | {_cell(r.get('why', ''))} |" for r in tier["reasons"]]
         lines += how
     elif level == risk.CODE:
         code = tier.get("code", [])
         lines += ["No high-risk rule matched, but the pull request changes code, and every code change is reviewed:", ""]
-        lines += [f"- `{name}`" for name in code[:50]] + ([f"- and {len(code) - 50} more"] if len(code) > 50 else [])
+        lines += [f"- {_name(name)}" for name in code[:50]] + ([f"- and {len(code) - 50} more"] if len(code) > 50 else [])
         lines += how
     else:
         lines.append(f"No code among the {tier['files']} changed file(s): only paths the review station skips.")

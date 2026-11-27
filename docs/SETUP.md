@@ -50,17 +50,18 @@ The later steps call this directory `$FACTORY`. If your shell does not keep vari
 
 ## Step 3. Write the rules
 
-Copy `starter/factory.yml` from the factory to the root of the repository as `factory.yml`, and fill it in from the readiness report's "For setup" section. [The factory file spec](../spec/factory-file.md) says what each key means.
+Copy `starter/factory.yml` from the factory to the root of the repository as `factory.yml`, and fill it in from the readiness report's "For setup" section. [The factory file spec](../spec/factory-file.md) says what each key means. `factory:` is only a name for the group of repositories run this way; nothing reads it yet, and the organisation's name will do.
 
 **Owner decides** two lists. Put your proposal in front of them with the reason for each entry.
 
-**The risky areas.** For each: a name, the paths, and a `why`. The `why` is shown to the reviewer on every high-risk change, so write what goes wrong for a real person, not what the code is ("moves money; a mistake charges real customers", not "billing module"). Fewer, sharper areas are better than many. If everything is high risk, nothing is.
+**The risky areas.** For each: a name, the paths, and a `why`. The `why` is shown to the reviewer on every high-risk change, so write what goes wrong for a real person, not what the code is ("moves money; a mistake charges real customers", not "billing module"). Fewer, sharper areas are better than many. If everything is high risk, nothing is. A small repository may have only one, usually its workflows; that is a fine answer. Rewrite the `why` of every example you keep so that it is true of this repository.
 
-**The paths a review may skip.** A change that touches only these needs no review at all. Start with prose (`"**/*.md"`) and stop there unless the owner asks for more. Three things to tell them before they add any:
+**The paths a review may skip.** A change that touches only these needs no review at all. Start with prose (`"**/*.md"`) and stop there unless the owner asks for more. Four things to tell them before they add any:
 
 - A skipped path is skipped even inside a risky area.
 - Skipping tests means a change can delete a test, or loosen what it asserts, with nobody looking.
 - Generated files are safe to skip only if something else checks they match their source.
+- Skipping all prose also skips the file that tells agents how to work here (`AGENTS.md`, `CLAUDE.md`), so that file can then change with no review. Naming it as a risky area does not help, because a skipped path is skipped first. If that matters to the owner, list the prose to skip more narrowly (`"docs/**/*.md"`, `README.md`) instead of `"**/*.md"`.
 
 Two files are always high risk whatever the lists say: `factory.yml` itself and the review standard it names.
 
@@ -95,7 +96,7 @@ Copy `docs/REVIEW_STANDARD.md` from the factory to the same path in the reposito
 
 ## Step 6. Add the workflow
 
-Copy `starter/factory-gate.yml` from the factory to `.github/workflows/factory-gate.yml` and replace `COMMIT`, in both places, with the id from step 2.
+Copy `starter/factory-gate.yml` from the factory to `.github/workflows/factory-gate.yml` and replace `COMMIT`, in both places, with the id from step 2. Then delete the lines at the top that say how to copy the file and replace the placeholder; keep the safety notes.
 
 Check before you commit:
 
@@ -120,15 +121,15 @@ The gate needs a comment on the pull request, from an account that can write to 
 
 A reviewer that posts through a GitHub App does not count, and neither does the workflow's own token, unless `factory.yml` names that account as its automatic reviewer. If author and reviewer share one login, the gate cannot tell them apart; the standard says so, and the owner should know it.
 
-Then add a short section to the file the repository's agents read at the start of their work. Without it, an authoring agent does not know the line exists. Adapt this:
+Then add a short section to the file the repository's agents read at the start of their work. If the repository has no such file, create `AGENTS.md` at its root. Without it, an authoring agent does not know the line exists. Adapt this:
 
 > **How changes are made here.** Every change goes in by pull request. Run the tests before you open one: `THE TEST COMMAND`. Do not review your own change and do not post a review record for it. When the checks are green, ask for an independent review as `docs/REVIEW_STANDARD.md` describes. A new commit after a review needs a new review. Changes to `factory.yml` and the review standard are always high risk, and so is anything in the risk areas `factory.yml` lists. If a check blocks you, say so; do not look for a way round it.
 
 ## Step 8. Merge, then make the checks required
 
-Open one pull request with the files from steps 3, 5, 6 and 7. The gate will not report on it: the workflow only starts once it is on the default branch. Have it reviewed in the ordinary way and merge it.
+Open one pull request with the files from steps 3, 5, 6 and 7. The gate will not report on it: the workflow only starts once it is on the default branch. Have it reviewed and merge it. If the repository has no way of reviewing yet, use the reviewer from step 7. Tell them that the standard is not on the default branch yet: they read `docs/REVIEW_STANDARD.md` from this pull request's branch, and there is no gate summary to consult for this one change.
 
-Then do step 9 once, with nothing required yet, to see the gate report.
+Then do the first half of step 9 (the three pull requests and their statuses) with nothing required yet, to see the gate report. Leave them open. After the checks are made required, do the second half (the review, then the new commit) on one of them: it then also shows merging being blocked and unblocked.
 
 **Owner decides** the last part, and an administrator makes it. In the rules for the default branch:
 
@@ -136,7 +137,27 @@ Then do step 9 once, with nothing required yet, to see the gate report.
 - require these status checks: each test check from the readiness report, and `independent-review`;
 - do not let administrators bypass the rules. An administrator's merge that skips the gate is the one nobody will notice.
 
+Require `independent-review` by that exact name. A pull request also shows a check called `gate / gate`: that is the workflow job that works the answer out, and it is green when it reached an answer, whichever answer that was. Do not require it in place of the status.
+
+GitHub's own "required approvals" can stay at zero. The independent review is recorded as a comment and enforced by the status, and where one account does all the work nobody could give a GitHub approval anyway. A team that already requires approvals can keep them; the two do not conflict.
+
 Read the rules that are there before changing anything, and add to them. If you make the change through the API, do not send a request that replaces the whole protection with a new one: it silently drops every rule you did not repeat. Afterwards read the rules back and show the owner the result.
+
+When the branch has no rules at all (readiness A4 found no ruleset and "Branch not protected"), there is nothing to drop, and one request sets everything above. Put the test check names in `contexts`:
+
+```
+gh api -X PUT repos/OWNER/REPO/branches/BRANCH/protection --input - <<'EOF'
+{
+  "required_status_checks": {"strict": false, "contexts": ["YOUR-TEST-CHECK", "independent-review"]},
+  "enforce_admins": true,
+  "required_pull_request_reviews": {"required_approving_review_count": 0},
+  "restrictions": null
+}
+EOF
+gh api repos/OWNER/REPO/branches/BRANCH/protection
+```
+
+`strict: false` means a pull request need not be up to date with the branch before merging; that is the owner's choice and not something the factory needs. Read the protection again just before sending it, in case something was added since the readiness check. When rules already exist, do not send this request. Change them in the repository's settings pages; or, if status checks are already required, add the names and nothing else with `gh api -X POST repos/OWNER/REPO/branches/BRANCH/protection/required_status_checks/contexts -f 'contexts[]=independent-review'`.
 
 Once `independent-review` is required, a pull request on which the gate has not reported cannot merge. That is intended. It also means that if the workflow is ever removed or cannot start, merging stops until it is fixed or the requirement is lifted (see "Turning it off").
 
@@ -148,7 +169,9 @@ Open three small pull requests and watch the `independent-review` status on each
 |---|---|
 | Only a file the review skips, such as a line of prose | Passed: "No code changed: no independent review needed" |
 | A line of real code outside every risk area | Not passed: "No independent review recorded for" the commit. The summary on the run lists the code that changed |
-| A file inside a risk area | Not passed, naming the area. The summary gives the area, the file and the rule |
+| A file inside a risk area | Not passed, naming the area. The summary gives the area, the file, the rule and why the area matters |
+
+The summary is on the workflow run's page: follow the "Details" link beside the status, or `gh run view RUN --repo OWNER/REPO` and open the link it prints. The same text is printed in the job's log.
 
 On one that is waiting, have the reviewer from step 7 do a real review and post the record. The status should turn to passed once the workflow has run again, which the comment starts. Then push another commit to it: the status should go back to not passed, saying the review is for the earlier commit.
 
