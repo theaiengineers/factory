@@ -25,7 +25,7 @@ And one setting: the test checks and `independent-review` become required to mer
 
 ## Step 1. Check readiness
 
-Use the readiness report. If its verdict is not stage 1, stop and give the owner the gaps. If it has an "unknown" in section A, get it answered first.
+Use the readiness report. If its verdict is not stage 1, stop and give the owner the gaps. If it has an "unknown" in section A, get it answered first. The one exception is A1 graded unknown because Actions are limited to a selected list: only a run settles that, so carry on and watch for it in step 9.
 
 ## Step 2. Pick the factory version
 
@@ -46,7 +46,7 @@ python3 -m venv "$FACTORY/.venv"
 "$FACTORY/.venv/bin/pip" install --require-hashes --only-binary :all: -r "$FACTORY/requirements.txt"
 ```
 
-The later steps call this directory `$FACTORY`.
+The later steps call this directory `$FACTORY`. If your shell does not keep variables from one command to the next, write the directory's path down and use it in place of `$FACTORY`; a later step that fails with "no such file or directory" on `.venv/bin/python` has lost it.
 
 ## Step 3. Write the rules
 
@@ -64,7 +64,7 @@ Copy `starter/factory.yml` from the factory to the root of the repository as `fa
 
 Two files are always high risk whatever the lists say: `factory.yml` itself and the review standard it names.
 
-When the file is filled in, `grep -n CHANGE factory.yml` should find nothing. The gate accepts a file with a placeholder left in; the rule simply never matches.
+When the file is filled in, delete the starter's comments about replacing values; `grep -n CHANGE factory.yml` should then find nothing. The gate accepts a file with a placeholder left in; the rule simply never matches.
 
 Set `require` under the `testing` station to the test check names from the readiness report. The gate does not enforce that list yet. It is the record of what step 8 makes required, and it is where a later factory version will read it from.
 
