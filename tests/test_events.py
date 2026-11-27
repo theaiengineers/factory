@@ -350,7 +350,7 @@ class Testing(unittest.TestCase):
                                            run("lint", "2026-01-15T12:10:01Z", "2026-01-15T12:10:30Z", suite=2, ident=6)])
         self.assertEqual([(e["type"], e.get("outcome")) for e in found],
                          [("station.entered", None), ("station.finished", "failed"), ("station.entered", None), ("station.finished", "pass")])
-        self.assertEqual(found[-1]["evidence"], "https://github.test/runs/5")
+        self.assertEqual(found[-1]["evidence"], f"https://github.com/example/shop/commit/{A}/checks")
 
     def test_a_run_that_starts_and_finishes_in_one_second_and_one_dated_backwards(self):
         at = "2026-01-15T12:05:10Z"
@@ -360,32 +360,82 @@ class Testing(unittest.TestCase):
         self.assertEqual([(e["type"], e["time"]) for e in back], [("station.entered", at), ("station.finished", at)])
 
     def test_an_earlier_export_is_always_inside_a_later_one(self):
-        # Generated histories of check runs, each exported at every second along the way.
+        # Generated lives of check runs, as GitHub shows them from second to second, exported at every second.
+        #   normal     made, waits (with the made time as its start), really starts, may finish
+        #   cancelled  made, waits, is cancelled without starting: it keeps the made time as its start
+        #   copy       "Re-run failed jobs": a new id carrying an earlier finished run's times and result
         rng = random.Random(7)
         second = lambda n: f"2026-01-15T12:{n // 60:02d}:{n % 60:02d}Z"      # noqa: E731
-        for _ in range(300):
-            runs, start = [], 0
-            for ident in range(1, rng.randint(2, 8)):
-                start += rng.randint(0, 3)               # GitHub makes runs in order, so a later id never starts earlier
-                end = start + rng.randint(0, 4) if rng.random() < 0.85 else None
-                runs.append(run(rng.choice(["tests", "lint"]), second(start), second(end) if end is not None else None,
-                                conclusion=rng.choice(["success", "failure", "cancelled"]), suite=rng.randint(1, 2), ident=ident))
+
+        def seen_at(lives, moment):
+            out = []
+            for ident, (kind, name, made, start, end, conclusion, suite) in enumerate(lives, 1):
+                if made > moment:
+                    continue
+                base = {"id": ident, "name": name, "check_suite": {"id": suite}, "html_url": f"https://github.test/runs/{ident}"}
+                if kind == "copy" or (end is not None and end <= moment and (kind == "cancelled" or start <= moment)):
+                    out.append({**base, "status": "completed", "started_at": second(start), "completed_at": second(end), "conclusion": conclusion})
+                elif kind == "normal" and start <= moment:
+                    out.append({**base, "status": "in_progress", "started_at": second(start), "completed_at": None, "conclusion": None})
+                else:
+                    out.append({**base, "status": "queued", "started_at": second(made), "completed_at": None, "conclusion": None})
+            return out
+
+        for _ in range(400):
+            lives, made = [], 0
+            for _ in range(rng.randint(1, 7)):
+                made += rng.randint(0, 3)                 # GitHub makes runs in order, so a later id is never made earlier
+                name, suite, kind = rng.choice(["tests", "lint"]), rng.randint(1, 2), rng.choice(["normal"] * 6 + ["cancelled", "copy"])
+                finished = [life for life in lives if life[4] is not None and life[4] <= made and life[0] != "cancelled"]
+                if kind == "copy" and finished:
+                    _, name, _, start, end, conclusion, suite = rng.choice(finished)
+                    lives.append(("copy", name, made, start, end, conclusion, suite))
+                elif kind == "cancelled":
+                    lives.append(("cancelled", name, made, made, made + rng.randint(0, 3), "cancelled", suite))
+                else:
+                    start = made + rng.randint(0, 3)
+                    end = start + rng.randint(0, 4) if rng.random() < 0.85 else None
+                    lives.append(("normal", name, made, start, end, rng.choice(["success", "success", "failure", "cancelled"]), suite))
             earlier = {}
-            for moment in range(0, 18):
-                seen = [({**r, "completed_at": None, "status": "in_progress", "conclusion": None}
-                         if r["completed_at"] and r["completed_at"] > second(moment) else r)
-                        for r in runs if r["started_at"] <= second(moment)]
-                # Runs not yet started are there too, waiting, with the start time GitHub invents for them.
-                seen += [{**r, "started_at": second(moment), "completed_at": None, "status": "queued", "conclusion": None}
-                         for r in runs if r["started_at"] > second(moment) and rng.random() < 0.5]
-                found = self.station(seen)
-                now = {e["id"]: e for e in found}
+            for moment in range(0, 34):
+                gh = FakeGitHub([pull()], runs={A: seen_at(lives, moment)})
+                found = [e for e in events.export(gh, config.parse(RULES), [12], recorded=second(moment), settle=1) if e.get("station") == "testing"]
+                now = {e["id"]: {k: v for k, v in e.items() if k != "recorded"} for e in found}
                 self.assertEqual(len(now), len(found))
                 for ident, event in earlier.items():
-                    self.assertEqual(now.get(ident), event, (runs, moment))
+                    self.assertEqual(now.get(ident), event, (lives, moment))
                 kinds = [e["type"] for e in found]
-                self.assertEqual(kinds, (["station.entered", "station.finished"] * len(kinds))[:len(kinds)])
+                self.assertEqual(kinds, (["station.entered", "station.finished"] * len(kinds))[:len(kinds)], (lives, moment))
                 earlier = now
+
+    def test_rerunning_only_the_failed_job_copies_the_others_and_changes_nothing_already_said(self):
+        first = [run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"),
+                 run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)]
+        before = self.station(first)
+        copy = run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=9)          # a new id, the old times
+        during = self.station(first + [copy, {**run("tests", "2026-01-15T12:10:00Z", ident=8), "status": "queued"}])
+        after = self.station(first + [copy, run("tests", "2026-01-15T12:10:07Z", "2026-01-15T12:11:00Z", ident=8)])
+        self.assertEqual([(e["type"], e.get("outcome")) for e in before], [("station.entered", None), ("station.finished", "failed")])
+        self.assertEqual((during, after[:2]), (before, before))
+        self.assertEqual([(e["type"], e.get("outcome"), e["time"]) for e in after[2:]],
+                         [("station.entered", None, "2026-01-15T12:10:07Z"), ("station.finished", "pass", "2026-01-15T12:11:00Z")])
+
+    def test_a_run_cancelled_while_it_waited_does_not_move_what_was_said(self):
+        # It keeps the time it was made as its start. An export during the wait must not have said otherwise.
+        sibling = run("lint", "2026-01-15T12:10:04Z", ident=2)
+        waiting = {**run("tests", "2026-01-15T12:10:00Z", ident=1), "status": "queued"}
+        cancelled = run("tests", "2026-01-15T12:10:00Z", "2026-01-15T12:10:05Z", conclusion="cancelled", ident=1)
+        during = self.station([waiting, sibling])
+        after = self.station([cancelled, sibling])
+        self.assertEqual(during, [])
+        self.assertEqual([(e["type"], e["time"]) for e in after], [("station.entered", "2026-01-15T12:10:00Z")])
+
+    def test_nothing_from_the_last_minute_is_written(self):
+        gh = FakeGitHub([pull()], runs={A: self.FIRST}, statuses={A: [status("2026-01-15T12:06:00Z", "success", "No code changed")]})
+        at = lambda when, **kw: [e["time"] for e in events.export(gh, config.parse(RULES), [12], recorded=when, **kw)]     # noqa: E731
+        self.assertEqual(at("2026-01-15T12:06:30Z"), ["2026-01-15T12:05:07Z", "2026-01-15T12:05:10Z"])
+        self.assertEqual(len(at("2026-01-15T12:07:00Z")), 4)
+        self.assertEqual(len(at("2026-01-15T12:06:00Z", settle=0)), 2)                    # never the second still going on
 
     def test_earlier_attempts_are_asked_for(self):
         gh = FakeGitHub([pull()], runs={A: self.FIRST})

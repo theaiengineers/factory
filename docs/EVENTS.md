@@ -29,13 +29,18 @@ python3 -m factory.events export --limit 30 > events.jsonl
 
 It reads `factory.yml` from the default branch for the station names, the required checks, the automatic reviewer and the branch. When the factory file names a `branch`, only pull requests into it are read. It makes several requests for each pull request and a few for each commit, so a large export takes a while and counts against the token's hourly limit.
 
-Every event's `id` is worked out from GitHub's own id for the thing the event is made from: a status, a check run, a pull request. Those never change. What an event says happened (its type, time, change, station, outcome and reason) is fixed with it, and nothing that can be edited afterwards is carried, so a pull request's title and base branch are not in the record; a reader that wants them asks GitHub by the pull request's number. Export twice and the same events come out with the same ids, so a reader that keeps one event for each id can be fed overlapping exports.
+Every event's `id` is worked out from GitHub's own id for the thing the event is made from (a status, a pull request), which never changes, or, for the testing station, from the commit, the checks asked for, the moment and the result. What an event says happened (its type, time, change, station, outcome and reason) is fixed with it, and nothing that can be edited afterwards is carried, so a pull request's title and base branch are not in the record; a reader that wants them asks GitHub by the pull request's number. Export twice and the same events come out with the same ids, so a reader that keeps one event for each id can be fed overlapping exports.
 
-Events are written only from what has settled. A check that is still waiting for a machine to run on is not read yet, because GitHub changes its start time when it really starts; its `station.entered` appears in the next export after it has started.
+Events are written only from what has settled, so the record runs a little behind:
 
-Two fields are read as they are at the time of the export and can differ between two exports of the same event: `actor`, because an account can be renamed, and `evidence` on a review's result, because a review record can be deleted (the gate is then named in its place). `check` reports such a pair as an id used for two different events, which is what it is. And a later export can hold fewer events than an earlier one, never more history: a force-push removes commits, GitHub keeps only the last time a pull request was closed, and a check name added to `require` later makes an earlier commit's testing station look unfinished.
+- Nothing from the last minute is written. A second that is still going on has not shown everything that happens in it.
+- On a commit where a required check is waiting for a machine to run on, nothing about that commit's checks is written from the moment that run was made. GitHub gives a waiting run a start time (when it was made), replaces it when the run really starts, and keeps it if the run is cancelled first; whatever the run turns into can only change the story from that moment on.
 
-The station names and the list of required checks are part of the ids. If either is changed in the factory file, the same history comes out as new events with new ids, beside the ones an earlier export gave: a testing result is an answer to "did these checks pass", and a different list is a different question.
+The next export has what was held back.
+
+Two fields are read as they are at the time of the export and can differ between two exports of the same event: `actor`, because an account can be renamed, and `evidence`, because a review record can be deleted (the gate is then named in its place) and every address changes if the repository is renamed or moved. `check` reports such a pair as an id used for two different events, which is what it is. And a later export can hold fewer events than an earlier one, never more history: a force-push removes commits, GitHub keeps only the last time a pull request was closed, and a deleted workflow run takes its checks with it.
+
+The station names, the list of required checks and the factory file's `building` (the repository's name, when the file gives none) are part of the ids. If either is changed in the factory file, the same history comes out as new events with new ids, beside the ones an earlier export gave: a testing result is an answer to "did these checks pass", and a different list is a different question.
 
 Events come out in order of time. Events of the same second on one pull request keep the order GitHub recorded them in for each station.
 
@@ -59,6 +64,10 @@ With `--pr` the named pull requests are read whatever branch they are into.
 The gate sets a status every time it runs. Several in a row that say the same thing are one event.
 
 Earlier attempts of a check are read as well as the latest. Once the station has finished as `failed`, a re-run leaves a second `station.entered` and then the second result, and the first pair does not change when the re-run happens. (A check that fails and is run again while another required check is still running was never a finished station, and leaves only the final result.) For each required name, the run that counts is the one that started last, whichever workflow or attempt it belongs to. When two workflows report under one name at the same time, that is the later of the two, and the other is not weighed.
+
+"Re-run failed jobs" makes GitHub copy every job it does not run again: a new check run with the old times and the old result. A copy says nothing new and is left out. A job that was skipped is copied with new times, and can show as a short extra entry and pass. A run that was cancelled before it started has, as its start, the time it was made.
+
+`evidence` on a testing event is the commit's checks page on GitHub, not one run.
 
 On a review's `pass` or `sent_back`, `actor` and `evidence` are the author and address of the newest review record for that commit with that verdict, posted before the gate's status. When there is none, they are the gate and its run.
 
@@ -90,7 +99,7 @@ The names in an event (a login, a check's name, a station's name) come from GitH
 python3 -m factory.events check < events.jsonl
 ```
 
-It reads events on standard input and says what is wrong with each line against the spec's required fields and closed lists, and whether an id was used for two different events. It does not check everything the spec says: not that a `shipment.started` names its actor, for instance, nor anything about what an event means. A time with a leap second (`:60`) is refused. It ends with a count, and fails when there is any problem. It is for anything that writes events, not only this exporter.
+It reads events on standard input and says what is wrong with each line against the spec's required fields and closed lists, and whether an id was used for two different events. It does not check everything the spec says: not that a `shipment.started` names its actor or what `carries` holds, for instance, nor anything about what an event means. A time with a leap second (`:60`) is refused. It ends with a count, and fails when there is any problem. It is for anything that writes events, not only this exporter.
 
 ## What is not built
 

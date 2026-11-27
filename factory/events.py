@@ -9,14 +9,16 @@ gate set are already a dated, append-only history; `export` reads it and writes 
 the record can be made again at any time, covers the time before it was first asked for, and needs no secret beyond a
 token that can read the repository.
 
-Every event's `id` is worked out from GitHub's own id for the thing it is made from (a status, a check run, a pull
-request), which never changes. What an event says happened (its type, time, change, station, outcome and reason) is
+Every event's `id` is worked out from GitHub's own id for the thing it is made from (a status, a pull request), which
+never changes, or, for the checks station, from the commit, the checks asked for, the moment and the result. What an
+event says happened (its type, time, change, station, outcome and reason) is
 fixed with it, and nothing that can be edited afterwards, such as a title, is carried. So exporting twice gives the
 same events with the same ids, and a reader that keeps one event for each id can be fed overlapping exports (the
 spec's "repeats are harmless").
 
-Events are written only from what has settled. A check run that is still waiting for a machine is not read, because
-GitHub changes its start time when it really starts.
+Events are written only from what has settled. Nothing from the last minute is written, and on a commit where a
+required check is waiting for a machine, nothing about its checks from the moment that run was made: GitHub changes
+a waiting run's start time when it really starts. The next export has what was held back.
 
 Two things are read as they are at the time of the export, and so can differ between two exports of one event: who
 (`actor`), since an account can be renamed, and the link to the review record (`evidence`), since a comment can be
@@ -72,6 +74,7 @@ MAX_COMMITS = 250                # GitHub lists at most this many commits of a p
 MAX_RUN_PAGES = 10               # check runs read for one commit, a hundred to a page
 MAX_STATUSES = 1000              # statuses read for one commit, newest first, under every name
 MAX_COMMENTS = 10_000            # comments read for one pull request
+SETTLE_SECONDS = 60              # nothing newer than this is written: see export
 
 # What the review gate's status says, by the words review_gate.decide gives it. (kind, reason code, plain sentence)
 SKIPPED, PASSED, SENT_BACK, PERSON, WAITING, ERROR, UNKNOWN = "skipped", "pass", "sent_back", "person", "waiting", "error", "unknown"
@@ -114,15 +117,21 @@ def actor_of(user: dict | None, automatic: dict | None = None) -> dict | None:
 class Writer:
     """Makes the events of one building, each with the fields every event carries.
 
-    An event's id comes from `source`: GitHub's own id for the thing the event is made from (a status, a check run,
-    a pull request's number), with a word for which event of that thing it is. Those ids never change and are never
-    reused, so two events made from two things can never share an id, whatever second they happened in, and the
-    same thing gives the same id in every export. The pull request's number is part of it too, because two pull
+    An event's id comes from `source`. For the review station and the pull request itself that is GitHub's own id
+    for the thing the event is made from (a status, a pull request's number), with a word for which event of that
+    thing it is: those ids never change and are never reused, so two statuses in one second are two events. For the
+    checks station it is the commit, the station, the checks asked for, the moment and the result (see
+    testing_events for why a check run's id will not do). Either way the same history gives the same id in every
+    export. The pull request's number is part of it too, because two pull
     requests can share a commit and each then has that commit's events."""
 
-    def __init__(self, factory: str, building: str, recorded: str):
+    def __init__(self, factory: str, building: str, recorded: str, repo: str = ""):
         self.base = {"spec": SPEC, "factory": factory, "building": building, "line": None}
-        self.recorded, self.events = recorded, []
+        self.recorded, self.events, self.repo = recorded, [], repo
+
+    def checks_page(self, sha: str) -> str | None:
+        """Where GitHub shows a commit's checks. One address for the commit, so it does not depend on which run."""
+        return f"https://github.com/{self.repo}/commit/{sha}/checks" if self.repo else None
 
     def add(self, type_: str, time: str | None, number: int, commit: str | None, source: tuple, **more) -> None:
         if not time:
@@ -152,43 +161,65 @@ def testing_events(out: Writer, gh, number: int, sha: str, station: str, names: 
     For each required name the run that stands is the one that started last, whichever workflow it came from: that
     is the result GitHub shows for the name. `station.entered` when a required check starts while the station is
     idle; `station.finished` each time every required name has a standing run and all of them have finished. A
-    re-run after a failure is therefore a second entry and a second finish, and the first pair stays in the record.
+    re-run after the station finished is therefore a second entry and a second finish, and the first pair stays.
 
-    Only a run that is running or has finished is read. While a run waits for a machine, GitHub gives it a start
-    time that it replaces when the run really starts; an event written from that would change later.
+    Check runs are not as simple as statuses, and three things GitHub does shape this:
 
-    Within one second, runs are taken in the order GitHub made them (a re-run is always made after the run it
-    repeats), each one's start before its finish. So a failure and the re-run that begins in the same second are
-    both seen."""
+    - While a run waits for a machine it carries a start time (when it was made) that GitHub replaces when it really
+      starts, and keeps if it is cancelled first. So nothing is written from the moment the oldest waiting run was
+      made onwards: whatever that run turns into can only change the story from there. A later export has the rest.
+    - "Re-run failed jobs" makes a new check run, with a new id and the old times, for each job it does not run
+      again. Such a copy is left out (it says nothing new), and an event's id here is built from when it happened
+      and what it says, not from a run's id.
+    - A re-run is always made after the run it repeats. Within one second, runs are therefore taken in the order
+      GitHub made them, each one's start before its finish."""
     if not names:
         return
+    runs, told = [], set()
+    for r in sorted((r for r in check_runs(gh, sha) if r.get("name") in names and r.get("started_at") and r.get("id") is not None),
+                    key=lambda r: r["id"]):
+        # A copy made by "Re-run failed jobs": same name, same times, same result as a run GitHub made earlier.
+        story = (r["name"], r["started_at"], r.get("completed_at"), r.get("conclusion")) if r.get("status") == "completed" else r["id"]
+        if story not in told:
+            told.add(story)
+            runs.append(r)
+    waiting = [r["started_at"] for r in runs if r.get("status") not in ("in_progress", "completed")]
+    unsettled_from = min(waiting, default=None)
     moments = []
-    for r in check_runs(gh, sha):
-        started, ident = r.get("started_at"), r.get("id")
-        if r.get("name") not in names or not started or ident is None or r.get("status") not in ("in_progress", "completed"):
+    for r in runs:
+        if r.get("status") not in ("in_progress", "completed"):
             continue
-        moments.append((started, ident, False, r))
-        if r.get("status") == "completed" and r.get("completed_at"):
-            moments.append((max(started, r["completed_at"]), ident, True, r))     # a finish dated before its start: at the start
+        moments.append((r["started_at"], r["id"], False, r))
+        if r["status"] == "completed" and r.get("completed_at"):
+            moments.append((max(r["started_at"], r["completed_at"]), r["id"], True, r))    # a finish dated before its start: at the start
     checks, standing, done, busy = {"kind": "system", "id": "checks"}, {}, set(), False
-    required = ",".join(sorted(names))       # in the ids: a different list of required checks asks a different question
+    asked = ("checks", sha, station, ",".join(sorted(names)))     # a different list of required checks asks a different question
+    said: dict = {}
+
+    def nth(*what) -> int:
+        """The station can finish, start again and finish the same way within one second: the second time is its own event."""
+        said[what] = said.get(what, 0) + 1
+        return said[what]
     for when, ident, finished, r in sorted(moments, key=lambda m: m[:3]):
+        if unsettled_from is not None and when >= unsettled_from:
+            break
         if not finished:
             standing[r["name"]] = r
             if not busy:
                 busy = True
-                out.add("station.entered", when, number, sha, ("check run", ident, "entered", station, required), station=station, actor=checks)
+                out.add("station.entered", when, number, sha, (*asked, "entered", when, nth("entered", when)), station=station, actor=checks, evidence=out.checks_page(sha))
             continue
         done.add(ident)
         if standing.get(r["name"]) is not r:
             continue                 # an attempt that a later one has already replaced
         current = list(standing.values())
-        if not busy or {c["name"] for c in current} != set(names) or any(c.get("id") not in done for c in current):
+        if not busy or {c["name"] for c in current} != set(names) or any(c["id"] not in done for c in current):
             continue
         busy = False
         failed = sorted({c["name"] for c in current if c.get("conclusion") not in reviewer.PASSED_CONCLUSIONS})
-        out.add("station.finished", when, number, sha, ("check run", ident, "finished", station, required), station=station,
-                outcome="failed" if failed else "pass", actor=checks, evidence=r.get("html_url") if isinstance(r.get("html_url"), str) else None,
+        outcome = "failed" if failed else "pass"
+        out.add("station.finished", when, number, sha, (*asked, "finished", when, outcome, *failed, nth("finished", when, outcome, *failed)), station=station, outcome=outcome,
+                actor=checks, evidence=out.checks_page(sha),
                 reason={"code": "checks.failed", "text": "A required check did not pass"} if failed else None,
                 data={"factory": {"checks": sorted(names), **({"failed": failed} if failed else {})}})
 
@@ -245,7 +276,7 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
     number, opened = pr["number"], pr.get("created_at")
     review = cfg.get("review") or {}
     automatic, review_station = review.get("automatic"), str(review["station"]) if review.get("station") else None
-    checks = [(str(s["station"]), [n for n in s.get("require") or [] if isinstance(n, str) and n])
+    checks = [(str(s["station"]), [n for n in (s["require"] if isinstance(s.get("require"), list) else []) if isinstance(n, str) and n])
               for s in cfg["raw"].get("intake") or [] if isinstance(s, dict) and s.get("uses") == "checks" and s.get("station")]
     commits = gh.pages(f"pulls/{number}/commits", MAX_COMMITS)
     dated = [(c["sha"], ((c.get("commit") or {}).get("committer") or {}).get("date")) for c in commits if c.get("sha")]
@@ -277,15 +308,21 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
 
 
 def export(gh, cfg: dict, numbers: list[int] | None = None, limit: int = 30, since: str | None = None,
-           context: str = review_gate.CONTEXT, recorded: str | None = None) -> list[dict]:
+           context: str = review_gate.CONTEXT, recorded: str | None = None, settle: int = SETTLE_SECONDS) -> list[dict]:
     """The events of the named pull requests, or of the `limit` changed most recently (not before `since`), in order
-    of time. Only pull requests into the factory file's `branch` are read, when it names one and none is named here."""
-    recorded = recorded or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    of time. Only pull requests into the factory file's `branch` are read, when it names one and none is named here.
+
+    Nothing from the last `settle` seconds is written: a second that is still going on has not shown everything
+    that happens in it, and GitHub's lists can run a little behind. The next export has it."""
+    now = datetime.datetime.strptime(recorded, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc) if recorded \
+        else datetime.datetime.now(datetime.timezone.utc)
+    recorded = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    settled_until = (now - datetime.timedelta(seconds=max(1, settle))).strftime("%Y-%m-%dT%H:%M:%SZ")
     raw = cfg["raw"]
     building = raw["building"] if isinstance(raw.get("building"), str) and raw["building"] else gh.repo
     factory = raw["factory"] if isinstance(raw.get("factory"), str) and raw["factory"] else gh.repo.split("/")[0]
     branch = raw["branch"] if isinstance(raw.get("branch"), str) and raw["branch"] else None
-    out = Writer(factory, building, recorded)
+    out = Writer(factory, building, recorded, gh.repo)
     if numbers:
         prs = [gh.get(f"pulls/{n}") for n in dict.fromkeys(numbers)]
     else:
@@ -306,7 +343,8 @@ def export(gh, cfg: dict, numbers: list[int] | None = None, limit: int = 30, sin
     # followed it. (Python's sort keeps equal keys in their first order.)
     unique: dict = {}
     for e in out.events:
-        unique.setdefault(e["id"], e)
+        if e["time"][:19] + "Z" <= settled_until:
+            unique.setdefault(e["id"], e)
     return sorted(unique.values(), key=lambda e: e["time"])
 
 
@@ -323,7 +361,7 @@ def problems(event) -> list[str]:
         if not isinstance(event.get(name), str) or not event[name].strip():
             found.append(f"`{name}` is required and must be text")
     for name in ("time", "recorded"):
-        if name in event or name == "time":
+        if event.get(name) is not None or name == "time":
             if not is_time(event.get(name)):
                 found.append(f"`{name}` must be a UTC time such as 2026-01-15T12:16:00Z")
     type_ = event.get("type")
