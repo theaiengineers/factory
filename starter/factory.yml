@@ -21,6 +21,9 @@ intake:
     uses: independent-review
     standard: docs/REVIEW_STANDARD.md
     skip_when_only: ["**/*.md"]
+    # Prose that is reviewed all the same, because it steers the work: the file your agents read before they start.
+    # CHANGE to the file or files your repository uses, or delete the line if it has none. Needs v0.5.0 or later.
+    never_skip: ["**/AGENTS.md", "**/CLAUDE.md"]
     # To let the automatic reviewer's record count, uncomment these lines and add starter/factory-reviewer.yml.
     # See https://github.com/theaiengineers/factory/blob/main/docs/AUTOMATIC_REVIEWER.md
     # automatic:

@@ -37,6 +37,7 @@ intake:
 | `require` | For `checks`: the check names that must pass |
 | `standard` | For `independent-review`: the document reviewers follow |
 | `skip_when_only` | The station is skipped when a change touches nothing outside these paths |
+| `never_skip` | For `independent-review`: paths that are reviewed even though `skip_when_only` matches them. For prose that steers the work, such as `AGENTS.md`. Such a path is judged like any other: it needs a review, and it is high risk if it is inside a risk area. From v0.5.0; an earlier gate ignores the key and skips the path |
 | `automatic` | For `independent-review`: the automatic reviewer whose records count. `account` is the bot login it posts from, such as `github-actions[bot]`; a person's login is refused. `passes` lists the levels its pass counts for: `[code]` (the default) or `[code, high]`. Its findings always count. A record from that account counts only when it is signed with the repository's reviewer key. `credential_renewed` (optional, a day written `YYYY-MM-DD`) is when the model credential was last created; the reviewer health check uses it to warn that renewal is due, and the gate ignores it. See [the automatic reviewer](../docs/AUTOMATIC_REVIEWER.md) |
 
 ## `risk`: what needs extra care
@@ -58,7 +59,7 @@ Three rules decide how much care a change needs:
 - **Code:** it touches anything else, outside every risk area. It needs a review.
 - **High:** it touches a risk area. It needs a review, and release gates hold.
 
-A skipped path never raises the level, even inside a risk area: a test beside sensitive code is still a test. There are two exceptions, both always high whatever the skip paths say: `factory.yml` itself, because it holds the rules that judge every change, and the file the review station names as its `standard`, because it is what reviewers follow. The gate reads those rules from the default branch, so a pull request cannot loosen the rules that judge it.
+A skipped path never raises the level, even inside a risk area: a test beside sensitive code is still a test. A path listed under the review station's `never_skip` is not a skipped path, whatever `skip_when_only` says. There are two exceptions, both always high whatever the skip paths say: `factory.yml` itself, because it holds the rules that judge every change, and the file the review station names as its `standard`, because it is what reviewers follow. The gate reads those rules from the default branch, so a pull request cannot loosen the rules that judge it.
 
 ### Path patterns
 

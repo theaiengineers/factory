@@ -35,7 +35,7 @@ git ls-remote --tags --sort=-v:refname https://github.com/theaiengineers/factory
 
 Take the 40-character id on the line ending `^{}` for the newest tag. That commit id is the version. Write it down with the tag name; it is used in steps 3 and 6.
 
-Use v0.2.0 or later. That is the first version with the starter files and the preview this guide uses; with an earlier one, steps 3 and 4 fail.
+Use v0.5.0 or later. The starter files and the preview this guide uses arrived in v0.2.0, and the starter's `never_skip` line is read from v0.5.0; an earlier version ignores that line.
 
 Get a copy of the factory at that version to work from, in a new directory outside the repository you are setting up:
 
@@ -61,9 +61,11 @@ Copy `starter/factory.yml` from the factory to the root of the repository as `fa
 - A skipped path is skipped even inside a risky area.
 - Skipping tests means a change can delete a test, or loosen what it asserts, with nobody looking.
 - Generated files are safe to skip only if something else checks they match their source.
-- Skipping all prose also skips the file that tells agents how to work here (`AGENTS.md`, `CLAUDE.md`), so that file can then change with no review. Naming it as a risky area does not help, because a skipped path is skipped first. If that matters to the owner, list the prose to skip more narrowly (`"docs/**/*.md"`, `README.md`) instead of `"**/*.md"`.
+- Skipping all prose would also skip the file that tells agents how to work here (`AGENTS.md`, `CLAUDE.md`), so that file could change with no review. Naming it as a risky area does not help, because a skipped path is skipped first. The starter therefore lists those files under `never_skip`, which keeps them reviewed whatever the skip list says. Set it to the file this repository's agents actually read (the one step 7 adds to), and add any other prose that steers the work, such as a runbook. It needs v0.5.0 or later: an earlier gate ignores the key without saying so.
 
 Two files are always high risk whatever the lists say: `factory.yml` itself and the review standard it names.
+
+The preview in step 4 follows `never_skip` too, so it shows what the list does.
 
 When the file is filled in, delete the starter's comments about replacing values; `grep -n CHANGE factory.yml` should then find nothing. The gate accepts a file with a placeholder left in; the rule simply never matches.
 
