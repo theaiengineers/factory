@@ -319,9 +319,10 @@ class Answer(unittest.TestCase):
         self.assertNotIn("\\\\", body)
 
     def test_an_item_cannot_start_a_rule_a_quote_or_a_nested_list(self):
-        for start in ("- -", "1. nested", "> quote", "+ plus", "=== x"):
+        for start in ("- -", "1. nested", "+ plus", "=== x"):
             self.assertTrue(reviewer.clean(start).startswith("\u200b"), start)
         self.assertTrue(reviewer.clean("2) nested").startswith("2\\)"))      # an escaped bracket starts no list
+        self.assertTrue(reviewer.clean("> quote").startswith("&gt;"))          # an escaped angle starts no quote
         self.assertFalse(reviewer.clean("Read the diff").startswith("\u200b"))
         self.assertNotIn("$x$", reviewer.clean("maths $x$"))
         self.assertNotIn("GH-12", reviewer.clean("see GH-12"))
