@@ -6,7 +6,7 @@ For the stations the factory has today (tests, then the independent review), not
 
 That has three consequences worth knowing:
 
-- **It can be made again at any time.** Lose the file and nothing is lost.
+- **It can be made again at any time.** Lose the file and it can be written out again, apart from the few things GitHub itself stops keeping (see the limits below).
 - **It covers the past.** A repository that adopts the factory today can write out the record of last month's pull requests.
 - **It needs no secret of its own.** A token that can read the repository is enough.
 
@@ -29,7 +29,11 @@ python3 -m factory.events export --limit 30 > events.jsonl
 
 It reads `factory.yml` from the default branch for the station names, the required checks, the automatic reviewer and the branch. When the factory file names a `branch`, only pull requests into it are read. It makes several requests for each pull request and a few for each commit, so a large export takes a while and counts against the token's hourly limit.
 
-Every event's `id` is worked out from the thing it describes: which pull request, commit, station, moment and outcome. An event carries nothing that can be edited afterwards, so a pull request's title and base branch are not in the record; a reader that wants them asks GitHub by the pull request's number. Export twice and the same events come out with the same ids, so a reader that keeps one event for each id can be fed overlapping exports. A later export can hold fewer events than an earlier one (a force-push removes commits, below), never a different event under an id already used.
+Every event's `id` is worked out from GitHub's own id for the thing the event is made from: a status, a check run, a pull request. Those never change. What an event says happened (its type, time, change, station, outcome and reason) is fixed with it, and nothing that can be edited afterwards is carried, so a pull request's title and base branch are not in the record; a reader that wants them asks GitHub by the pull request's number. Export twice and the same events come out with the same ids, so a reader that keeps one event for each id can be fed overlapping exports.
+
+Two fields are read as they are at the time of the export and can differ between two exports of the same event: `actor`, because an account can be renamed, and `evidence` on a review's result, because a review record can be deleted (the gate is then named in its place). `check` reports such a pair as an id used for two different events, which is what it is. And a later export can hold fewer events than an earlier one, never more history: a force-push removes commits, GitHub keeps only the last time a pull request was closed, and a check name added to `require` later makes an earlier commit's testing station look unfinished.
+
+Events come out in order of time. Events of the same second on one pull request keep the order GitHub recorded them in for each station.
 
 With `--pr` the named pull requests are read whatever branch they are into.
 
@@ -39,9 +43,9 @@ With `--pr` the named pull requests are read whatever branch they are into.
 |---|---|---|
 | `change.opened` | The pull request | When it was opened |
 | `change.updated` | Each commit on the pull request whose own date is after the pull request was opened | The commit's own date (see the limits) |
-| `station.entered`, testing | A check run named in `require` starting on a commit, when none was running | When it started |
-| `station.finished`, testing | Every required check having reported, with none still running. `pass`, or `failed` with the names that did not pass in `data` (a cancelled or timed-out check is not a pass) | When the last of them finished |
-| `station.entered`, review | The gate's first status on a commit that says a review is awaited | When the gate set it |
+| `station.entered`, testing | A check run named in `require` starting on a commit, when the station was idle (not yet entered, or finished) | When it started |
+| `station.finished`, testing | Every required name having a run, and the newest run of each having finished. `pass`, or `failed` with the names that did not pass in `data` (a cancelled or timed-out check is not a pass) | When the last of them finished |
+| `station.entered`, review | A gate status on a commit that says a review is awaited, when the one before it said something else | When the gate set it |
 | `station.finished`, review | A gate status that says pass (`pass`), open findings (`sent_back`), no review needed (`skipped`), or could not decide (`error`) | When the gate set it |
 | `action.needed` | A gate status that says the automatic review passed and a person's review is also needed | When the gate set it |
 | `action.cleared` | The next gate status on that commit that says something else | When the gate set it |
@@ -50,7 +54,7 @@ With `--pr` the named pull requests are read whatever branch they are into.
 
 The gate sets a status every time it runs. Several in a row that say the same thing are one event.
 
-Earlier attempts of a check are read as well as the latest. A check that failed and was run again leaves a `failed`, a second `station.entered` and then the second result, and the first two do not change when the re-run happens.
+Earlier attempts of a check are read as well as the latest. A check that failed and was run again leaves a `failed`, a second `station.entered` and then the second result, and the first two do not change when the re-run happens. For each required name, the run that counts is the one that started last, whichever workflow or attempt it belongs to. When two workflows report under one name at the same time, that is the later of the two, and the other is not weighed.
 
 On a review's `pass` or `sent_back`, `actor` and `evidence` are the author and address of the newest review record for that commit with that verdict, posted before the gate's status. When there is none, they are the gate and its run.
 
@@ -66,7 +70,8 @@ Reason codes the factory writes: `review.findings`, `review.not_needed`, `review
 - **That an action or a wait ended, when the commit was replaced.** An `action.needed` or a review `station.entered` on a commit is closed only by a later status on the same commit. When a new commit takes over, nothing closes the old one; read a later `change.updated`, `change.merged` or `change.closed` as ending it.
 - **Which record the gate counted.** The reviewer named on a `pass` or `sent_back` is the author of the newest record with that verdict posted before the gate's status. A record from an account the gate does not count, posted in the few seconds between the real record and the gate's status, would be named in its place.
 - **Checks that report as statuses.** The testing station's events come from check runs. A required name that is reported only as a commit status gives no testing events.
-- **Very large pull requests.** GitHub lists at most 250 commits of a pull request, and at most 1,000 check runs on a commit are read.
+- **Very large or very busy pull requests.** GitHub lists at most 250 commits of a pull request. On one commit, at most 1,000 check runs and the newest 1,000 statuses (under every name, not only the gate's) are read; on one pull request, at most 10,000 comments. Past those, events are missing and nothing says so.
+- **An earlier close.** GitHub keeps only the last time a pull request was closed, so one that was closed, reopened and closed again has one `change.closed`.
 - **Which pull request a commit's events belong to.** Two pull requests that share a commit both get the events of that commit.
 - **Who an account is.** `person` means an account that is not a bot. An agent working through a person's login looks the same.
 - **That a status is the gate's.** A status is not signed. Anyone who can write to the repository can set one under the gate's name. A status in the gate's words is read as the gate's. A status in other words is still recorded, because it decides whether the pull request can merge, and it is marked: `reason.code` is `review.status_unrecognised` and `data.factory.unrecognised_status` is true.
@@ -81,7 +86,7 @@ The names in an event (a login, a check's name, a station's name) come from GitH
 python3 -m factory.events check < events.jsonl
 ```
 
-It reads events on standard input and says what is wrong with each line against the spec's required fields and closed lists, and whether an id was used for two different events. It does not check everything the spec says: not that a `shipment.started` names its actor, for instance, nor anything about what an event means. It ends with a count, and fails when there is any problem. It is for anything that writes events, not only this exporter.
+It reads events on standard input and says what is wrong with each line against the spec's required fields and closed lists, and whether an id was used for two different events. It does not check everything the spec says: not that a `shipment.started` names its actor, for instance, nor anything about what an event means. A time with a leap second (`:60`) is refused. It ends with a count, and fails when there is any problem. It is for anything that writes events, not only this exporter.
 
 ## What is not built
 
