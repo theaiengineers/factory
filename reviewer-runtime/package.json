@@ -1,0 +1,9 @@
+{
+  "name": "factory-reviewer-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pins the program the automatic reviewer calls. Installed with npm ci, so every file is checked against the hashes in package-lock.json.",
+  "dependencies": {
+    "@anthropic-ai/claude-code": "2.1.321"
+  }
+}

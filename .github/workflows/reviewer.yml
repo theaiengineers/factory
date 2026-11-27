@@ -1,0 +1,149 @@
+name: reviewer
+
+# The automatic reviewer (factory/reviewer.py). When a pull request needs an independent review and has none for its
+# head commit, a model reads the change and the result is posted as the review record. See docs/AUTOMATIC_REVIEWER.md.
+#
+# Call it from a workflow in your own repository (starter/factory-reviewer.yml is one to copy):
+#
+#   on:
+#     pull_request_target:
+#       types: [opened, synchronize, reopened, ready_for_review]
+#   permissions: {}
+#   jobs:
+#     review:
+#       permissions:
+#         contents: read
+#         pull-requests: write
+#         statuses: write
+#         checks: read
+#       uses: theaiengineers/factory/.github/workflows/reviewer.yml@<commit>
+#       with:
+#         factory_ref: <the same commit>
+#       secrets:
+#         claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}     # or anthropic_api_key
+#
+# It does nothing unless the factory file on the default branch names an automatic reviewer (review station,
+# `automatic.account: github-actions[bot]`): without that the gate would not count the record.
+#
+# SAFETY. Two jobs with different powers.
+#   review   holds the model's credential and can only read. It never checks out or runs the pull request: it reads
+#            the diff and the changed files through the API as text and gives them to the model, which has no tools.
+#   record   can comment and set a status, and never holds the model's credential. It checks the review job's
+#            result again, writes the record itself, and runs the gate.
+# Nothing here may ever check out `github.event.pull_request.head` or run a file from it.
+#
+# PINNING. As for review-gate.yml: pin `uses:` and `factory_ref` to the same full commit id. That commit fixes the
+# factory's code, the checkout action, PyYAML (by hash) and the model's program (reviewer-runtime/package-lock.json,
+# by hash; its install scripts are not run, and the one step it needs is run by name).
+
+on:
+  workflow_call:
+    inputs:
+      factory_ref:
+        description: The version of the factory to run. Use the same commit id as in `uses:`.
+        type: string
+        required: true
+      context:
+        description: Name of the gate's status. Use the name your gate workflow uses.
+        type: string
+        default: independent-review
+      pr:
+        description: Pull request number, when started by hand. Leave empty when started by a pull request.
+        type: string
+        default: ""
+      force:
+        description: Review even when the author cannot write to the repository. For a maintainer starting it by hand.
+        type: boolean
+        default: false
+      model:
+        description: The model to ask, as a full model id. Empty uses the program's default.
+        type: string
+        default: ""
+      wait_minutes:
+        description: How long to wait for the checks the factory file requires before giving up.
+        type: number
+        default: 20
+    secrets:
+      claude_code_oauth_token:
+        description: A Claude subscription token from `claude setup-token`.
+        required: false
+      anthropic_api_key:
+        description: An Anthropic API key. Used in preference to the subscription token when both are given.
+        required: false
+
+permissions: {}
+
+concurrency:
+  group: reviewer-${{ inputs.context }}-${{ inputs.pr || github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      statuses: read
+    outputs:
+      result: ${{ steps.review.outputs.result }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+        with:
+          repository: theaiengineers/factory
+          ref: ${{ inputs.factory_ref }}
+          persist-credentials: false
+      - name: Install PyYAML, by hash, as a prebuilt wheel only
+        run: |
+          python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
+      - name: Install the model's program, by hash, without running install scripts
+        working-directory: reviewer-runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node node_modules/@anthropic-ai/claude-code/install.cjs
+          ./node_modules/.bin/claude --version
+      - name: Review
+        id: review
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_code_oauth_token }}
+          MODEL: ${{ inputs.model }}
+          WAIT_MINUTES: ${{ inputs.wait_minutes }}
+          FORCE: ${{ inputs.force && '1' || '' }}
+        run: |
+          export PATH="$PWD/reviewer-runtime/node_modules/.bin:$PATH"
+          python3 -m factory.reviewer review --pr "$PR_NUMBER" --out "$RUNNER_TEMP/result.json" \
+            --wait-minutes "$WAIT_MINUTES" --model "$MODEL" ${FORCE:+--force}
+          echo "result=$(cat "$RUNNER_TEMP/result.json")" >> "$GITHUB_OUTPUT"
+
+  record:
+    needs: review
+    # GitHub drops a job output that contains a secret, so an answer carrying the credential arrives here empty.
+    if: needs.review.outputs.result != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+        with:
+          repository: theaiengineers/factory
+          ref: ${{ inputs.factory_ref }}
+          persist-credentials: false
+      - name: Install PyYAML, by hash, as a prebuilt wheel only
+        run: |
+          python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
+      - name: Record the review and run the gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
+          CONTEXT: ${{ inputs.context }}
+          RESULT: ${{ needs.review.outputs.result }}
+        run: |
+          printf '%s' "$RESULT" > "$RUNNER_TEMP/result.json"
+          python3 -m factory.reviewer record --pr "$PR_NUMBER" --result "$RUNNER_TEMP/result.json" --context "$CONTEXT"

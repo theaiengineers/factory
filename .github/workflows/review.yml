@@ -1,0 +1,35 @@
+name: review
+
+# This repository's own pull requests are reviewed by the automatic reviewer it publishes.
+# It does nothing until a model credential is added as a repository secret.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number
+        required: true
+      force:
+        description: Review even though the author cannot write to this repository
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  review:
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+      checks: read
+    uses: ./.github/workflows/reviewer.yml
+    with:
+      factory_ref: main
+      pr: ${{ inputs.pr }}
+      force: ${{ inputs.force || false }}
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

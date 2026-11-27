@@ -54,6 +54,10 @@ DESCRIPTION_LIMIT = 140          # GitHub's limit on a status description
 # OWNER is taken at its word. `latest_record` then counts the associations below.
 TRUSTED_ASSOCIATIONS = ("OWNER", "COLLABORATOR")
 UNTRUSTED = "NONE"
+# A record from the automatic reviewer the factory file names (review station, `automatic.account`). `trust_writers`
+# gives it this association. It counts like a writer's, except that its pass counts only for the levels the factory
+# file lists under `automatic.passes`; its findings always count.
+AUTOMATIC = "AUTOMATIC"
 RECHECKS = 3                     # times the commit is judged again when the answer changes while the gate runs
 WRITE_PERMISSIONS = ("admin", "maintain", "write")
 ATTEMPTS = 3                     # per API call, for a network fault or a 5xx / rate-limit answer
@@ -76,20 +80,23 @@ def is_malformed_marker(body: str | None) -> bool:
     return bool(MARKER_ATTEMPT.match(first)) and not MARKER.match(first)
 
 
-def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | None = None) -> dict:
+def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | None = None,
+                  automatic_passes: bool = False) -> dict:
     """What the pull request's comments record about `head_sha`.
 
     Returns {"verdict": "pass" | "findings" | None, "stale": sha of the newest record for another commit or None,
-    "malformed": n, "early": n}. The newest record for the head commit wins, so findings posted after a pass block
+    "malformed": n, "early": n, "held": n}. `held` counts passes from the automatic reviewer that were not counted
+    because `automatic_passes` is false: they neither pass the commit nor clear earlier findings. The newest record for the head commit wins, so findings posted after a pass block
     again and a pass posted after findings clears them. A record whose comment was created before the head commit was
     made (`head_committed_at`, ISO 8601 UTC) cannot be a review of it and is not counted. Only records whose
     association is in TRUSTED_ASSOCIATIONS count; pass the comments through `trust_writers` first, which sets it from
     the account's real permission.
     """
     head = head_sha.lower()
-    verdict, stale, malformed, early = None, None, 0, 0
+    verdict, stale, malformed, early, held = None, None, 0, 0, 0
     for c in sorted(comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)):
-        if c.get("author_association") not in TRUSTED_ASSOCIATIONS:
+        automatic = c.get("author_association") == AUTOMATIC
+        if not automatic and c.get("author_association") not in TRUSTED_ASSOCIATIONS:
             continue
         if is_malformed_marker(c.get("body")):
             malformed += 1
@@ -101,23 +108,28 @@ def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | 
             stale = marker[0]
         elif head_committed_at and (c.get("created_at") or "") < head_committed_at:
             early += 1
+        elif automatic and marker[1] == PASS and not automatic_passes:
+            held += 1
         else:
             verdict = marker[1]
-    return {"verdict": verdict, "stale": stale, "malformed": malformed, "early": early}
+    return {"verdict": verdict, "stale": stale, "malformed": malformed, "early": early, "held": held}
 
 
-def decide(tier: dict, head_sha: str, comments: list[dict], head_committed_at: str | None = None, standard: str | None = None) -> tuple[str, str]:
-    """(state, description) of the commit status."""
+def decide(tier: dict, head_sha: str, comments: list[dict], head_committed_at: str | None = None, standard: str | None = None,
+           automatic: dict | None = None) -> tuple[str, str]:
+    """(state, description) of the commit status. `automatic` is the review station's automatic reviewer, if any."""
     short = head_sha[:7]
     level = tier["review"]
     if level == risk.NONE:
         return "success", "No code changed: no independent review needed"
     areas = ", ".join(tier["areas"]) if level == risk.HIGH else CODE_CHANGE
-    record = latest_record(comments, head_sha, head_committed_at)
+    record = latest_record(comments, head_sha, head_committed_at, bool(automatic) and level in automatic["passes"])
     if record["verdict"] == PASS:
         return "success", _fit(f"Review record for {short} says pass (a process control, not proof)", areas)
     if record["verdict"] == FINDINGS:
         return "failure", _fit(f"Review of {short} has open findings: fix or answer them, then review again", areas)
+    if record["held"]:
+        return "failure", _fit(f"Automatic review passed {short}; this change also needs a person's review", areas)
     if record["early"]:
         return "failure", _fit(f"The review record is older than commit {short}: review again", areas)
     if record["stale"]:
@@ -218,8 +230,11 @@ def load_config(gh, default_branch: str) -> dict:
     return config.parse(text)
 
 
-def trust_writers(gh, comments: list[dict]) -> list[dict]:
-    """Sets the association of every comment that carries (or attempts) a review marker from what the account may
+def trust_writers(gh, comments: list[dict], automatic: dict | None = None) -> list[dict]:
+    """Marks a record from the factory file's automatic reviewer (`automatic`, or None) as AUTOMATIC: the comment's
+    login is that account and GitHub says the account is a bot. No person can hold such a login.
+
+    Sets the association of every comment that carries (or attempts) a review marker from what the account may
     actually do: COLLABORATOR when it can write to the repository, otherwise untrusted. The permission is asked for
     once per account. An OWNER is not looked up.
 
@@ -229,8 +244,12 @@ def trust_writers(gh, comments: list[dict]) -> list[dict]:
     cache: dict[str, bool] = {}
     out = []
     for c in comments:
-        if c.get("author_association") != "OWNER" and (parse_marker(c.get("body")) or is_malformed_marker(c.get("body"))):
-            login = ((c.get("user") or {}).get("login") or "").strip()
+        marked = parse_marker(c.get("body")) or is_malformed_marker(c.get("body"))
+        user = c.get("user") or {}
+        if marked and automatic and user.get("login") == automatic["account"] and user.get("type") == "Bot":
+            c = {**c, "author_association": AUTOMATIC}
+        elif c.get("author_association") != "OWNER" and marked:
+            login = (user.get("login") or "").strip()
             if login and login not in cache:
                 try:
                     answer = gh.get(f"collaborators/{urllib.parse.quote(login, safe='')}/permission")
@@ -252,7 +271,7 @@ def evaluate_one(gh: GitHub, pr: dict, cfg: dict) -> dict:
         tier = {"review": risk.NONE, "files": 0, "areas": [], "reasons": [], "code": []}
         return {**base, "tier": tier, "state": "success",
                 "description": f"{config.FILE} has no independent-review station: nothing to check"}
-    standard = cfg["review"].get("standard")
+    standard, automatic = cfg["review"].get("standard"), cfg["review"].get("automatic")
     files = gh.pages(f"pulls/{number}/files", MAX_FILES)
     tier = risk.classify(files, cfg)
     if len(files) >= MAX_FILES:
@@ -262,9 +281,9 @@ def evaluate_one(gh: GitHub, pr: dict, cfg: dict) -> dict:
         tier["areas"] = sorted(set(tier["areas"]) | {"unreadable diff"})
     comments, committed_at = [], None
     if tier["review"] != risk.NONE:
-        comments = trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000))
+        comments = trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000), automatic)
         committed_at = gh.get(f"commits/{head_sha}")["commit"]["committer"]["date"]
-    state, description = decide(tier, head_sha, comments, committed_at, standard)
+    state, description = decide(tier, head_sha, comments, committed_at, standard, automatic)
     return {**base, "tier": tier, "state": state, "description": description, "standard": standard}
 
 

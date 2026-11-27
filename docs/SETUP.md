@@ -109,14 +109,16 @@ If the repository already enforces a review rule of its own and the owner wants 
 
 **Owner decides** who reviews.
 
-The gate needs a comment on the pull request, from an account that can write to the repository, whose first line is the marker for the exact head commit. How the review comes to be done is up to the team. Two arrangements work today:
+The gate needs a comment on the pull request, from an account that can write to the repository, whose first line is the marker for the exact head commit. How the review comes to be done is up to the team. Three arrangements work today:
+
+- **The automatic reviewer** (v0.3.0 or later): a model reviews each change when its tests pass, with nobody starting it. It needs a model credential and a line in `factory.yml`, and by default a high-risk change still needs a person. Set it up after this guide, from [its own page](AUTOMATIC_REVIEWER.md).
 
 - **A person** reads the change against the standard and posts the record.
 - **A fresh agent**, started for this one review and given only the pull request and the standard. It must not be the session that wrote the change, and it must not be shown the author's reasoning: a reviewer handed the author's conclusion tends to confirm it. A brief that works:
 
   > Review pull request NUMBER in OWNER/REPO against docs/REVIEW_STANDARD.md in that repository. You did not write this change and you have been told nothing about it on purpose. Read the diff, follow the changed code through its callers, and run the tests that cover it. Post your result as a new comment in the form the standard gives, for the head commit as it is when you finish. If you find something blocking, record findings; do not fix it yourself.
 
-A reviewer that posts through a GitHub App does not count, and neither does the workflow's own token. If author and reviewer share one login, the gate cannot tell them apart; the standard says so, and the owner should know it.
+A reviewer that posts through a GitHub App does not count, and neither does the workflow's own token, unless `factory.yml` names that account as its automatic reviewer. If author and reviewer share one login, the gate cannot tell them apart; the standard says so, and the owner should know it.
 
 Then add a short section to the file the repository's agents read at the start of their work. Without it, an authoring agent does not know the line exists. Adapt this:
 
@@ -172,7 +174,7 @@ Tell the owner, in plain words:
 
 ## What stage 1 does not do
 
-- It does not do the review. It checks that one was recorded for the exact commit.
+- It does not do the review. It checks that one was recorded for the exact commit. The [automatic reviewer](AUTOMATIC_REVIEWER.md) is the optional station that does.
 - It does not check that the tests passed. The required checks in step 8 do that.
 - It does not check that the reviewer is a different account from the author.
 - It does nothing after a change merges: no trial run, no release decision, no release, no watch, no alerts. Those are stages 2 and 3, and their factory parts are not published yet.
