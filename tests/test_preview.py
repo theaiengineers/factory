@@ -63,6 +63,14 @@ class Render(unittest.TestCase):
         self.assertIn("sign-in.", text)
         self.assertNotIn("payments.", text)
 
+    def test_an_empty_list_says_nothing_was_tried(self):
+        text = preview.render(preview.rows([], self.cfg), self.cfg)
+        self.assertIn("0 change(s)", text)
+        self.assertIn("tried against nothing", text)
+        self.assertNotIn("no change here touched", text)
+        one = preview.render(preview.rows([pr(1, "README.md")], self.cfg), self.cfg)
+        self.assertNotIn("tried against nothing", one)
+
     def test_no_quiet_area_line_when_every_area_was_touched(self):
         text = preview.render(preview.rows([pr(1, "api/billing/x.py", "api/auth/y.py")], self.cfg), self.cfg)
         self.assertNotIn("no change here touched", text)
