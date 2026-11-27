@@ -1,0 +1,22 @@
+name: review-health
+
+# Checks once a month that this repository's automatic reviewer can still reach its model, and opens an issue if not.
+
+on:
+  schedule:
+    - cron: "23 7 1 * *"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  health:
+    permissions:
+      contents: read
+      issues: write
+    uses: ./.github/workflows/reviewer-health.yml
+    with:
+      factory_ref: main
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+      anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

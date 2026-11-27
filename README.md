@@ -12,7 +12,7 @@ The independent-review gate. It reads the risk rules from your `factory.yml`, wo
 
 This repository runs on itself: its own [factory.yml](factory.yml) and gate judge its pull requests.
 
-The automatic reviewer. An optional station that does the review: when a change's tests pass, a model reads it against your standard and records pass or findings. It uses your own Claude subscription or API key, has no tools, and by default leaves high-risk changes to a person. See [docs/AUTOMATIC_REVIEWER.md](docs/AUTOMATIC_REVIEWER.md).
+The automatic reviewer. An optional station that does the review: when a change's tests pass, a model reads it against your standard and records pass or findings. It uses your own Claude subscription or API key, has no tools, and by default leaves high-risk changes to a person. A scheduled health check opens an issue when its credential stops working. See [docs/AUTOMATIC_REVIEWER.md](docs/AUTOMATIC_REVIEWER.md).
 
 ## Setting it up
 

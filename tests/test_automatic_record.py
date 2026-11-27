@@ -289,6 +289,22 @@ class Config(unittest.TestCase):
             self.parse("{account: 'github-actions[bot]', pases: [code, high]}")
         self.assertIn("pases", str(caught.exception))
 
+    def test_the_renewal_day_is_optional_and_must_be_a_day(self):
+        for given in ("2026-11-27", "'2026-11-27'"):
+            self.assertEqual(self.parse("{account: 'github-actions[bot]', credential_renewed: %s}" % given),
+                             {**CODE_ONLY, "credential_renewed": "2026-11-27"})
+        for bad in ("yesterday", "'2026-13-01'", "'2026-02-30'", "20261127", "2026-11-27T10:00:00Z", "[2026-11-27]", "0", "''"):
+            with self.assertRaises(config.ConfigError, msg=bad) as caught:
+                self.parse("{account: 'github-actions[bot]', credential_renewed: %s}" % bad)
+            self.assertIn("YYYY-MM-DD", str(caught.exception))
+        # Unquoted, PyYAML itself refuses a day that does not exist; that is a plain refusal too, not a crash.
+        for bad in ("2026-13-01", "2026-02-30"):
+            with self.assertRaises(config.ConfigError) as caught:
+                self.parse("{account: 'github-actions[bot]', credential_renewed: %s}" % bad)
+            self.assertIn("cannot be read", str(caught.exception))
+        with self.assertRaises(config.ConfigError):
+            config.parse("spec: factory/0.1\nbig: " + "9" * 5000 + "\n")
+
     def test_passes_must_be_known_levels(self):
         for bad in ("[]", "[none]", "[code, all]", "code", "[high]"):
             with self.assertRaises(config.ConfigError, msg=bad):

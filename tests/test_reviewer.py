@@ -399,6 +399,34 @@ class Ask(unittest.TestCase):
         self.assertEqual(seen["env"].get("ANTHROPIC_API_KEY"), "key-12345678")
         self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", seen["env"])
 
+    def test_a_refused_credential_is_told_apart_from_other_failures(self):
+        # What the program returns for a credential the provider will not accept (seen with 2.1.321).
+        for status in (401, 403):
+            refused = self.envelope(is_error=True, api_error_status=status, result="Failed to authenticate. API Error: 401")
+            with self.assertRaises(reviewer.CredentialRefused) as caught:
+                self.run_with(refused, code=1)
+            self.assertIn(str(status), str(caught.exception))
+            self.assertNotIn("authenticate", str(caught.exception))
+        for other in (429, 500, 529, None, "401", True):
+            with self.assertRaises(reviewer.ReviewerError) as caught:
+                self.run_with(self.envelope(is_error=True, api_error_status=other), code=1)
+            self.assertNotIsInstance(caught.exception, reviewer.CredentialRefused, other)
+        # A status on a call that worked means nothing.
+        self.assertEqual(self.run_with(self.envelope(api_error_status=401))[0]["verdict"], "pass")
+
+    def test_the_small_call_takes_its_own_instructions_and_returns_text(self):
+        seen = {}
+
+        def run(command, **kw):
+            seen.update(command=command, **kw)
+            return subprocess.CompletedProcess(command, 0, json.dumps({"is_error": False, "result": "OK"}), "")
+        said = reviewer.call_claude("PING", {"ANTHROPIC_API_KEY": "key-12345678", "PATH": "/bin"}, run=run,
+                                    system="SYS", ask="ASK", seconds=5)
+        command = seen["command"]
+        self.assertEqual((said, seen["timeout"], seen["input"], command[-1]), ("OK", 5, "PING", "ASK"))
+        self.assertEqual(command[command.index("--system-prompt") + 1], "SYS")
+        self.assertEqual(command[command.index("--tools") + 1], "")
+
     def test_failures_are_one_safe_sentence(self):
         cases = ((dict(stdout="not json"), "did not return JSON"), (dict(stdout=self.envelope(is_error=True, subtype="error_max_turns")), "error_max_turns"),
                  (dict(stdout=self.envelope(), code=1), "failed"), (dict(stdout=self.envelope(result="no")), "not the JSON object"),
@@ -449,6 +477,17 @@ class Review(unittest.TestCase):
     def test_what_cannot_be_read_is_left_to_a_person(self):
         out, asked = self.go(FakeGitHub(files=[{"filename": "logo.png", "status": "modified", "changes": 0}]))
         self.assertEqual((out["notice"], asked), ("unreadable", []))
+
+    def test_a_refused_credential_gets_its_own_notice_and_a_warning(self):
+        out, _ = self.go(raises=reviewer.CredentialRefused("refused (status 401)"))
+        self.assertEqual((out["action"], out["notice"], out.get("warn")), ("skip", "credential-refused", True))
+        self.assertIn("replace the secret", reviewer.NOTICES["credential-refused"])
+        gh = FakeGitHub()
+        said = reviewer.record(gh, 7, json.loads(json.dumps(out)), run_gate=lambda: self.fail("gate ran"))
+        self.assertIn("credential-refused", said)
+        self.assertEqual(len(gh.posted), 1)
+        self.assertIn("was refused", gh.posted[0][2]["body"])
+        self.assertNotIn("independent-review", gh.posted[0][2]["body"])
 
     def test_a_failed_model_call_records_nothing(self):
         out, _ = self.go(raises=reviewer.ReviewerError("boom"))

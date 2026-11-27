@@ -170,6 +170,8 @@ Tell the owner, in plain words:
 
 **Taking a new factory version.** Nothing arrives by itself. To move, replace the commit id in both places in `factory-gate.yml`, by pull request. Read what changed between the two versions first. To go back, restore the old id.
 
+**The automatic reviewer's credential.** If you use the automatic reviewer, its model credential will one day expire or be withdrawn. Nothing merges unreviewed when it does, but reviews stop until a person replaces it. Add the health check so that somebody is told: see [when the credential stops working](AUTOMATIC_REVIEWER.md#when-the-credential-stops-working).
+
 **Turning it off.** Remove `independent-review` from the required checks, then remove the workflow. Do it in that order, or merging is blocked in between. Both are the owner's decision.
 
 ## What stage 1 does not do

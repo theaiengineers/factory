@@ -4,6 +4,7 @@ Only the parts that code in this package reads are checked. Keys the engine does
 """
 from __future__ import annotations
 
+import datetime
 import re
 
 import yaml
@@ -28,15 +29,17 @@ def _strings(value, where: str) -> list[str]:
 
 
 def _automatic(value, where: str) -> dict | None:
-    """The review station's `automatic` reviewer: {"account", "passes"}, or None when there is none.
+    """The review station's `automatic` reviewer: {"account", "passes"} and, when the file gives one,
+    "credential_renewed" (a day, YYYY-MM-DD); or None when there is none.
 
+    `credential_renewed` is only read by the reviewer health check (reviewer_health.py); the gate ignores it.
     The account must be a bot's login (it ends `[bot]`). The gate takes a record from this account at its word, with
     no permission lookup, so naming a person here would let that person's records count whatever they may do."""
     if value is None:
         return None
     if not isinstance(value, dict):
         raise ConfigError(f"{where}.automatic must be a mapping with `account`")
-    unknown = sorted((k for k in value if k not in ("account", "passes")), key=str)
+    unknown = sorted((k for k in value if k not in ("account", "passes", "credential_renewed")), key=str)
     if unknown:
         raise ConfigError(f"{where}.automatic has a key it does not know: {unknown[0]}")
     account = value.get("account")
@@ -45,7 +48,23 @@ def _automatic(value, where: str) -> dict | None:
     passes = value.get("passes", ["code"])
     if not isinstance(passes, list) or "code" not in passes or not all(p in AUTOMATIC_LEVELS for p in passes):
         raise ConfigError(f"{where}.automatic.passes must list code, or code and high")
-    return {"account": account, "passes": list(dict.fromkeys(passes))}
+    out = {"account": account, "passes": list(dict.fromkeys(passes))}
+    renewed = _day(value.get("credential_renewed"), f"{where}.automatic.credential_renewed")
+    return {**out, "credential_renewed": renewed} if renewed else out
+
+
+def _day(value, where: str) -> str | None:
+    """A calendar day as YYYY-MM-DD, or None. YAML reads an unquoted date as a date; a quoted one arrives as text."""
+    if value is None:
+        return None
+    if isinstance(value, datetime.date) and not isinstance(value, datetime.datetime):
+        return value.isoformat()
+    if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        try:
+            return datetime.date.fromisoformat(value).isoformat()
+        except ValueError:
+            pass
+    raise ConfigError(f"{where} must be a day written YYYY-MM-DD")
 
 
 def parse(text: str) -> dict:
@@ -54,6 +73,10 @@ def parse(text: str) -> dict:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as e:
         raise ConfigError(f"{FILE} is not valid YAML: {str(e).splitlines()[0]}") from e
+    except ValueError as e:
+        # PyYAML lets a plain ValueError out for a value it cannot build: an unquoted value shaped like a date that
+        # is not a real day, or a number too long to convert.
+        raise ConfigError(f"{FILE} is not valid YAML: it has a value that cannot be read ({str(e).splitlines()[0][:120]})") from e
     if not isinstance(raw, dict):
         raise ConfigError(f"{FILE} must be a mapping")
     if not str(raw.get("spec", "")).startswith(SPEC_PREFIX):

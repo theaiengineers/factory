@@ -15,11 +15,12 @@ intake:
     automatic:
       account: github-actions[bot]
       passes: [code]
+      credential_renewed: 2026-11-27
 
 risk:
   - area: the gate
     why: decides whether other people's changes may merge; a fault passes what should fail
-    paths: [factory/review_gate.py, factory/risk.py, factory/config.py, factory/reviewer.py]
+    paths: [factory/review_gate.py, factory/risk.py, factory/config.py, factory/reviewer.py, factory/reviewer_health.py]
   - area: workflows
     why: runs in other repositories with a token that can write
     paths: [.github/workflows/**, starter/*.yml, reviewer-runtime/**]
