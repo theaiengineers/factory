@@ -63,6 +63,9 @@ def render(found: list[dict], cfg: dict) -> str:
         lines.append("There is no independent-review station in intake, so the gate checks nothing and passes every "
                      "change. Add one (`uses: independent-review`) for these rules to have any effect.")
         return "\n".join(lines) + "\n"
+    if not found:
+        lines.append("No merged pull request was listed, so the rules were tried against nothing. Check the list "
+                     "was made in the right repository.")
     quiet = unused_areas(found, cfg)
     if found and quiet:
         lines.append("Risk areas no change here touched (check the paths are spelt as they are in the repository): "
