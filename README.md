@@ -4,7 +4,15 @@ An open framework for running a repository as a software factory.
 
 AI agents can now write most of a change. What is still missing is the line the change travels down afterwards: the tests, the independent review, the trial run, the decision about whether it may be released without a person, the release itself and the watch that follows. Factory describes that line in one file, enforces it, and records every step so that people can see what happened.
 
-**Status: draft specifications only.** Nothing here runs yet. The two specs below are being extracted from a setup that already runs in production, and the engine will follow them into this repository.
+**Status: early.** The specs are drafts, and one station runs: the independent-review gate. The rest of the engine is being extracted from a setup that already runs in production.
+
+## What runs today
+
+The independent-review gate. It reads the risk rules from your `factory.yml`, works out whether a pull request needs a review, and sets a commit status that passes only when a reviewer has recorded a pass for the exact head commit. See [docs/REVIEW_STANDARD.md](docs/REVIEW_STANDARD.md) for the record a reviewer leaves, and the comment at the top of [.github/workflows/review-gate.yml](.github/workflows/review-gate.yml) for the few lines that add it to a repository.
+
+This repository runs on itself: its own [factory.yml](factory.yml) and gate judge its pull requests.
+
+To run the tests: `pip install pyyaml`, then `python3 -m unittest discover -s tests`.
 
 ## The idea in one picture
 
@@ -45,8 +53,8 @@ An example factory file is in [examples/factory.yml](examples/factory.yml).
 
 ## What comes next
 
-1. The independent-review gate and the "a person must act" convention, which are already independent of any one project.
-2. Risk rules and the release gate reading `factory.yml` instead of tables in code.
+1. The "a person must act" convention for anything that stops a line.
+2. The release gate reading `factory.yml`.
 3. An event writer at each station.
 4. The station interface and the first platform adapter.
 

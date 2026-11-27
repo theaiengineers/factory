@@ -1,0 +1,68 @@
+name: review-gate
+
+# Sets the independent-review status on a pull request's head commit (factory/review_gate.py).
+#
+# Call it from a workflow in your own repository:
+#
+#   on:
+#     pull_request_target:
+#       types: [opened, synchronize, reopened, ready_for_review, edited]
+#     issue_comment:
+#       types: [created, edited, deleted]
+#   permissions:
+#     statuses: write
+#     pull-requests: read
+#     contents: read
+#   jobs:
+#     gate:
+#       uses: theaiengineers/factory/.github/workflows/review-gate.yml@v0
+#       with:
+#         factory_ref: v0
+#
+# The review record is a pull request comment, so the status is recomputed when a comment is written as well as
+# when a commit is pushed.
+#
+# SAFETY. The pull request's code is never checked out and never run. The changed files and the comments are read
+# through the API as data, and the rules come from `factory.yml` on the caller's default branch. Nothing here may
+# ever check out `github.event.pull_request.head` or run a file from it.
+
+on:
+  workflow_call:
+    inputs:
+      context:
+        description: Name of the status to set. Use another name to run beside an existing gate.
+        type: string
+        default: independent-review
+      factory_ref:
+        description: The version of the factory to run. Use the same ref as in `uses:`.
+        type: string
+        default: main
+
+permissions:
+  statuses: write
+  pull-requests: read
+  contents: read
+
+concurrency:
+  group: review-gate-${{ inputs.context }}-${{ github.event.pull_request.number || github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    # Comments on plain issues are not this job's business.
+    if: github.event_name == 'pull_request_target' || github.event.issue.pull_request
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: theaiengineers/factory
+          ref: ${{ inputs.factory_ref }}
+          persist-credentials: false
+      - run: python3 -m pip install --quiet pyyaml
+      - name: Set the status
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          CONTEXT: ${{ inputs.context }}
+        run: python3 -m factory.review_gate --pr "$PR_NUMBER" --context "$CONTEXT"

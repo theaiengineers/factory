@@ -51,6 +51,18 @@ risk:
 
 `why` is required. It is shown to the reviewer and to the person a release is held for.
 
+Three rules decide how much care a change needs:
+
+- **None:** it touches only paths in the review station's `skip_when_only`.
+- **Code:** it touches anything else, outside every risk area. It needs a review.
+- **High:** it touches a risk area. It needs a review, and release gates hold.
+
+A skipped path never raises the level, even inside a risk area: a test beside sensitive code is still a test. The one exception is `factory.yml` itself, which is always high, because it holds the rules that judge every change. The gate reads those rules from the default branch, so a pull request cannot loosen the rules that judge it.
+
+### Path patterns
+
+`*` and `?` match within one path segment. `**` matches across segments, and `**/` also matches no directory at all, so `**/*.md` matches `README.md` and `docs/a/b.md`.
+
 ## `lines`: the production lines
 
 One entry for each place the building releases to.

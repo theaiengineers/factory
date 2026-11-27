@@ -1,0 +1,22 @@
+# This repository runs on itself. See spec/factory-file.md.
+spec: factory/0.1
+factory: theaiengineers
+building: theaiengineers/factory
+branch: main
+
+intake:
+  - station: testing
+    uses: checks
+    require: [tests]
+  - station: qa
+    uses: independent-review
+    standard: docs/REVIEW_STANDARD.md
+    skip_when_only: ["**/*.md", examples/**, LICENSE]
+
+risk:
+  - area: the gate
+    why: decides whether other people's changes may merge; a fault passes what should fail
+    paths: [factory/review_gate.py, factory/risk.py, factory/config.py]
+  - area: workflows
+    why: runs in other repositories with a token that can write
+    paths: [.github/workflows/**]

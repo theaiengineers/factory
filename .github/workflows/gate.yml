@@ -1,0 +1,20 @@
+name: gate
+
+# This repository's own pull requests go through the gate it publishes.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+  issue_comment:
+    types: [created, edited, deleted]
+
+permissions:
+  statuses: write
+  pull-requests: read
+  contents: read
+
+jobs:
+  gate:
+    uses: ./.github/workflows/review-gate.yml
+    with:
+      factory_ref: main
