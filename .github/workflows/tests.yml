@@ -16,5 +16,5 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
         with:
           persist-credentials: false
-      - run: python3 -m pip install --quiet --require-hashes -r requirements.txt
+      - run: python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
       - run: python3 -m unittest discover -s tests -v

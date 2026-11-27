@@ -12,7 +12,7 @@ The independent-review gate. It reads the risk rules from your `factory.yml`, wo
 
 This repository runs on itself: its own [factory.yml](factory.yml) and gate judge its pull requests.
 
-To run the tests: `python3 -m pip install --require-hashes -r requirements.txt`, then `python3 -m unittest discover -s tests`.
+To run the tests: `python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt`, then `python3 -m unittest discover -s tests`.
 
 ## The idea in one picture
 

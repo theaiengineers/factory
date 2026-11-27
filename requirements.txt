@@ -1,5 +1,5 @@
 # The one dependency, pinned by version and by the hash of every file PyPI publishes for it.
-# pip refuses anything else: python3 -m pip install --require-hashes -r requirements.txt
+# pip refuses anything else: python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
 # 6.0.3 was published on 25 September 2025. Move the pin in a reviewed pull request, to a release that has had time
 # to be looked at.
 pyyaml==6.0.3 \

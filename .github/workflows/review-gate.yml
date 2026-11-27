@@ -15,16 +15,19 @@ name: review-gate
 #     contents: read
 #   jobs:
 #     gate:
-#       uses: theaiengineers/factory/.github/workflows/review-gate.yml@v0
+#       uses: theaiengineers/factory/.github/workflows/review-gate.yml@<commit>
 #       with:
-#         factory_ref: v0
+#         factory_ref: <the same commit>
 #
 # The review record is a pull request comment, so the status is recomputed when a comment is written as well as
 # when a commit is pushed.
 #
 # PINNING. Pin both refs to a full commit id, not a tag, if the status this sets is one you require. Everything this
-# workflow then runs is fixed by that commit: the factory's code, the checkout action (pinned by commit below) and
-# its one dependency (requirements.txt, pinned by version and file hash).
+# workflow then fetches is fixed by that commit: the factory's code, the checkout action (pinned by commit below) and
+# its one dependency (requirements.txt: pinned by version and file hash, and installed only as a prebuilt wheel, so
+# nothing is built and no build tools are fetched; with no wheel for the runner's Python the install fails and no
+# status is set). `factory_ref` defaults to `main`: a caller that pins only `uses:` still runs unpinned code. The
+# runner image and the Python and pip on it are not pinned.
 #
 # SAFETY. The pull request's code is never checked out and never run. The changed files and the comments are read
 # through the API as data, and the rules come from `factory.yml` on the caller's default branch. Nothing here may
@@ -63,7 +66,7 @@ jobs:
           repository: theaiengineers/factory
           ref: ${{ inputs.factory_ref }}
           persist-credentials: false
-      - run: python3 -m pip install --quiet --require-hashes -r requirements.txt
+      - run: python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
       - name: Set the status
         env:
           GITHUB_TOKEN: ${{ github.token }}
