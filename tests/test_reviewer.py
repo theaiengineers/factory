@@ -260,6 +260,9 @@ class Prompt(unittest.TestCase):
         text = reviewer.build_prompt("STANDARD", tier, "T", "B", "CHANGE", fence="f00d")
         self.assertIn("=== f00d START: the change ===\nCHANGE\n=== f00d END ===", text)
         self.assertIn("- payments: moves money", text)
+        two = {"review": "high", "reasons": [{"area": "pay", "file": "a", "rule": "api/billing/**", "why": "moves money"},
+                                             {"area": "pay", "file": "b", "rule": "scripts/*stripe*", "why": "moves money"}]}
+        self.assertIn("- pay: moves money (files matching: api/billing/**, scripts/*stripe*)\n", reviewer.build_prompt("S", two, "T", "B", "C", fence="f"))
         self.assertLess(text.index("STANDARD"), text.index("f00d START"))
         one, two = (reviewer.build_prompt("S", tier, "T", "B", "C") for _ in range(2))
         self.assertNotEqual(one, two)
@@ -273,8 +276,9 @@ class PromptTrust(unittest.TestCase):
         prompt = reviewer.build_prompt("STANDARD", tier, "T", "B", "THE CHANGE", fence="fence1")
         trusted = prompt.split("=== fence1 START", 1)[0]
         self.assertNotIn("NOTE FROM THE OWNER", trusted)
-        self.assertNotIn("starter/", trusted)
-        self.assertEqual(trusted.count("- workflows: runs with a token"), 1)       # once for the area, on one line
+        self.assertNotIn("starter/x.yml", trusted)
+        self.assertNotIn("starter/y.yml", trusted)
+        self.assertEqual(trusted.count("- workflows: runs with a token (files matching: starter/*.yml)"), 1)   # once, on one line
         self.assertIn("- none", reviewer.build_prompt("S", {"review": "code", "reasons": []}, "T", "B", "C", fence="f"))
 
 
@@ -477,10 +481,30 @@ class Review(unittest.TestCase):
         out, asked = self.go(FakeGitHub(draft=True))
         self.assertEqual((out["action"], out["notice"], asked), ("skip", "quiet", []))
 
-    def test_no_credential_is_a_quiet_skip_with_a_warning(self):
+    def test_no_credential_is_said_on_the_pull_request_and_warned_on_the_run(self):
         out = reviewer.review(FakeGitHub(), 7, {}, ask=lambda *a: self.fail("asked"), wait=lambda *a: self.fail("waited"))
-        self.assertEqual((out["action"], out["notice"], out["warn"]), ("skip", "quiet", True))
-        self.assertIn("No model credential", out["why"])
+        self.assertEqual((out["action"], out["notice"], out["warn"]), ("skip", "credential-missing", True))
+        self.assertIn("CLAUDE_CODE_OAUTH_TOKEN", out["why"])                 # the secret's name, as the guide gives it
+        gh = FakeGitHub()
+        said = reviewer.record(gh, 7, json.loads(json.dumps(out)), run_gate=lambda: self.fail("gate ran"))
+        self.assertIn("credential-missing", said)
+        (_, path, body), = gh.posted
+        self.assertEqual(path, "issues/7/comments")
+        self.assertIn("no way to reach its model", body["body"])
+        self.assertNotIn("independent-review", body["body"])
+        # Once for a commit, however many times the reviewer runs.
+        again = FakeGitHub(comments=[{"body": body["body"], "user": {"login": BOT, "type": "Bot"}}])
+        reviewer.record(again, 7, json.loads(json.dumps(out)), run_gate=lambda: self.fail("gate ran"))
+        self.assertEqual(again.posted, [])
+
+    def test_nothing_is_said_when_there_was_nothing_to_review(self):
+        # No credential, but no review was wanted either: a draft, prose only, an outside author, no automatic reviewer.
+        quiet = (FakeGitHub(draft=True), FakeGitHub(files=[{"filename": "README.md", "status": "modified", "changes": 1, "patch": "x"}]),
+                 FakeGitHub(author="mallory"), FakeGitHub(rules=RULES.replace("    automatic:\n      account: github-actions[bot]\n", "")))
+        self.assertNotIn("automatic", quiet[-1].rules)
+        for gh in quiet:
+            out = reviewer.review(gh, 7, {}, ask=lambda *a: self.fail("asked"), wait=lambda *a: self.fail("waited"))
+            self.assertEqual((out["action"], out["notice"]), ("skip", "quiet"))
 
     def test_tests_first(self):
         for waited, notice in (("failed", "checks-failed"), ("timeout", "checks-timeout")):

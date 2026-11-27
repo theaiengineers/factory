@@ -63,6 +63,10 @@ NOTICES = {
                       "commit. Run the reviewer again when they have passed.",
     "model-failed": "The automatic reviewer could not complete a review (the model call failed or its answer could "
                     "not be used). Run the reviewer again, or ask a person.",
+    "credential-missing": "The automatic reviewer is switched on in the factory file but has no way to reach its "
+                          "model: neither secret it can use (`CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY`) is "
+                          "set, or the reviewer workflow does not pass one on. Someone who administers this "
+                          "repository needs to add it. Until then this change needs a person's review.",
     "credential-refused": "The automatic reviewer's model credential was refused: it has expired, been withdrawn, or "
                           "the subscription or account behind it can no longer be used. Someone who administers "
                           "this repository needs to replace the secret. Until then this change needs a person's "
@@ -268,8 +272,14 @@ def build_prompt(standard: str, tier: dict, title: str, body: str, change: str, 
     # Only the area and its reason go here: both come from the default branch. The file names that matched are the
     # pull request author's to choose (a name can even hold a line break), so they stay inside the fence below,
     # where the change itself names every file.
-    told = dict.fromkeys((" ".join(str(r["area"]).split()), " ".join(str(r["why"]).split())) for r in tier.get("reasons", []))
-    reasons = "\n".join(f"- {area}: {why}" for area, why in told) or "- none"
+    # The path pattern that matched is from the default branch too, so it is listed: without it, text inside the
+    # fence could say a file is outside an area with nothing trusted to contradict it.
+    told: dict = {}
+    for r in tier.get("reasons", []):
+        key = (" ".join(str(r["area"]).split()), " ".join(str(r["why"]).split()))
+        told.setdefault(key, {})[" ".join(str(r.get("rule") or "").split())] = None
+    reasons = "\n".join(f"- {area}: {why}" + (f" (files matching: {', '.join(r for r in rules if r)})" if any(rules) else "")
+                        for (area, why), rules in told.items()) or "- none"
     return "\n".join([
         "THE REVIEW STANDARD (from the default branch; this part is trusted):", standard, "",
         f"LEVEL: {tier['review']}", "RISK AREAS THIS CHANGE TOUCHES, AND WHY EACH MATTERS (trusted):", reasons, "",
@@ -287,7 +297,8 @@ def credential(environ) -> tuple[str, str]:
     for name in CREDENTIALS:
         if environ.get(name):
             return name, environ[name]
-    raise ReviewerError("No model credential: set the claude_code_oauth_token or anthropic_api_key secret")
+    raise ReviewerError("No model credential: add the repository secret CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, "
+                        "and check that the reviewer workflow passes it on")
 
 
 ASK = "Review the change given on standard input, as your instructions say."
@@ -501,7 +512,9 @@ def review(gh, number: int, environ, force: bool = False, wait_minutes: float = 
     try:
         credential(environ)
     except ReviewerError as e:
-        return {**out, "why": str(e), "warn": True}
+        # Said on the pull request, not only in the run: the run is green, and its warning is easy to miss. This is
+        # reached only for a change that needs a review, from an author who can write to the repository.
+        return {**out, "notice": "credential-missing", "why": str(e), "warn": True}
     cfg, tier, pr = decided["cfg"], decided["tier"], decided["pr_object"]
     checks = required_checks(cfg)
     waited = wait(gh, decided["head_sha"], checks, wait_minutes)

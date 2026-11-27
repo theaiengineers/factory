@@ -145,7 +145,7 @@ GitHub's own "required approvals" can stay at zero. The independent review is re
 
 Read the rules that are there before changing anything, and add to them. If you make the change through the API, do not send a request that replaces the whole protection with a new one: it silently drops every rule you did not repeat. Afterwards read the rules back and show the owner the result.
 
-When the branch has no rules at all (readiness A4 found no ruleset and "Branch not protected"), there is nothing to drop, and one request sets everything above. Put the test check names in `contexts`:
+When the branch has no rules at all (readiness A4 found no ruleset and "Branch not protected"), there is nothing to drop, and one request sets everything above. Put the test check names in `contexts`, and if step 6 gave the gate another name, use that name in place of `independent-review` only once the owner has decided it should block:
 
 ```
 gh api -X PUT repos/OWNER/REPO/branches/BRANCH/protection --input - <<'EOF'
@@ -169,11 +169,11 @@ Open three small pull requests and watch the `independent-review` status on each
 
 | Change | What the status should say |
 |---|---|
-| Only a file the review skips, such as a line of prose | Passed: "No code changed: no independent review needed" |
+| Only a file the review skips, such as a line in the README (not a file listed under `never_skip`) | Passed: "No code changed: no independent review needed" |
 | A line of real code outside every risk area | Not passed: "No independent review recorded for" the commit. The summary on the run lists the code that changed |
 | A file inside a risk area | Not passed, naming the area. The summary gives the area, the file, the rule and why the area matters |
 
-The summary is on the workflow run's page: follow the "Details" link beside the status, or `gh run view RUN --repo OWNER/REPO` and open the link it prints. The same text is printed in the job's log.
+The summary is on the workflow run's page: follow the "Details" link beside the status, or find the run with `gh run list --repo OWNER/REPO --workflow factory-gate.yml`, then `gh run view RUN --repo OWNER/REPO` and open the link it prints. The same text is printed in the job's log.
 
 On one that is waiting, have the reviewer from step 7 do a real review and post the record. The status should turn to passed once the workflow has run again, which the comment starts. Then push another commit to it: the status should go back to not passed, saying the review is for the earlier commit.
 

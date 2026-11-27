@@ -79,7 +79,7 @@ class Decision(unittest.TestCase):
         self.assertEqual(review_gate.decide(CODE, HEAD, [comment(marker())])[0], "success")
         self.assertEqual(review_gate.decide(CODE, HEAD, [comment(marker(verdict="findings"))])[0], "failure")
         text = review_gate.summary(CODE, "failure", description, HEAD, "docs/REVIEW_STANDARD.md")
-        self.assertIn("every code change is reviewed", text)
+        self.assertIn("changes files that are reviewed", text)
         self.assertIn("`cli/src/index.ts`", text)
         self.assertIn("`docs/REVIEW_STANDARD.md`", text)
         self.assertNotIn("The standard", review_gate.summary(CODE, "failure", description, HEAD))

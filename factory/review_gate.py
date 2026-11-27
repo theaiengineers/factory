@@ -222,7 +222,7 @@ def summary(tier: dict, state: str, description: str, head_sha: str, standard: s
         lines += how
     elif level == risk.CODE:
         code = tier.get("code", [])
-        lines += ["No high-risk rule matched, but the pull request changes code, and every code change is reviewed:", ""]
+        lines += ["No high-risk rule matched, but the pull request changes files that are reviewed (code, or prose the factory file says is never skipped):", ""]
         lines += [f"- {_name(name)}" for name in code[:50]] + ([f"- and {len(code) - 50} more"] if len(code) > 50 else [])
         lines += how
     else:
