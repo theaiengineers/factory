@@ -69,8 +69,10 @@ A factory writes one event for each thing that happens to a change or a shipment
 | `shipment.started` | A release leaves | `shipment`, `carries`, `actor` |
 | `shipment.landed` | The release is live | `shipment` |
 | `shipment.rolled_back` | The previous version was put back | `shipment`, `reason` |
-| `action.needed` | A person must act before anything moves | `assignees`, `reason` |
-| `action.cleared` | They did | |
+| `action.needed` | A person must act before anything moves | `assignees` (may be empty when nobody is named), `reason`; `change` and `station` when it is about one change at one station |
+| `action.cleared` | They did, or it no longer applies | The same `change` and `station` as the `action.needed` it answers |
+
+`python3 -m factory.events check` reads events and says which of them break the rules on this page.
 
 ## Outcomes
 
@@ -102,4 +104,5 @@ Fields that repeat are left out to keep the example readable.
 
 - **Orders across buildings.** A piece of work can need changes in two repositories. There is no field yet that links them.
 - **Identity.** `actor` assumes the agent that wrote a change can be told apart from the agent that reviewed it.
-- **Transport.** This spec defines the event, not how it is delivered or stored.
+- **Transport.** This spec defines the event, not how it is delivered or stored. For the stations before a merge, the factory writes events out from what GitHub already holds, on request ([the record of every step](../docs/EVENTS.md)); nothing sends them anywhere yet.
+- **Pairing.** A `station.finished` is not always preceded by a `station.entered` for the same station and commit, and a reader must not rely on one.

@@ -14,6 +14,8 @@ This repository runs on itself: its own [factory.yml](factory.yml) and gate judg
 
 The automatic reviewer. An optional station that does the review: when a change's tests pass, a model reads it against your standard and records pass or findings. It uses your own Claude subscription or API key, has no tools, and by default leaves high-risk changes to a person. A scheduled health check opens an issue when its credential stops working. See [docs/AUTOMATIC_REVIEWER.md](docs/AUTOMATIC_REVIEWER.md).
 
+The record of every step. One command writes out what happened to each change (opened, tested, reviewed, sent back, merged) as events, from what GitHub already holds. See [docs/EVENTS.md](docs/EVENTS.md).
+
 ## Setting it up
 
 Most people will set this up with an agent. Two guides are written for that, and a person can follow them too:
@@ -53,7 +55,7 @@ Everything else is built against these, so they are specified separately from an
 
 | Contract | What it defines | Status |
 |---|---|---|
-| [Event format](spec/event-format.md) | One record for each thing that happens on a line | Draft 0.1 |
+| [Event format](spec/event-format.md) | One record for each thing that happens on a line | Draft 0.1. Written out for the stations before a merge: [docs/EVENTS.md](docs/EVENTS.md) |
 | [Factory file](spec/factory-file.md) | The `factory.yml` that describes a building's lines, stations and rules | Draft 0.1 |
 | Station interface | How a step joins a line and answers pass, send back or hold | Not yet written |
 | Platform adapter | Deploy to staging, promote, check health, roll back | Not yet written |
@@ -64,7 +66,7 @@ An example factory file is in [examples/factory.yml](examples/factory.yml).
 
 1. The "a person must act" convention for anything that stops a line.
 2. The release gate reading `factory.yml`.
-3. An event writer at each station.
+3. Events for the stations after a merge, and somewhere to send them. (The stations before a merge have them: [docs/EVENTS.md](docs/EVENTS.md).)
 4. The station interface and the first platform adapter.
 
 ## Contributing
