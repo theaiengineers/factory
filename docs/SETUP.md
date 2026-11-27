@@ -35,13 +35,18 @@ git ls-remote --tags --sort=-v:refname https://github.com/theaiengineers/factory
 
 Take the 40-character id on the line ending `^{}` for the newest tag. That commit id is the version. Write it down with the tag name; it is used in steps 3 and 6.
 
-Get a copy of the factory at that version to work from. Keep it outside the repository you are setting up:
+Use v0.2.0 or later. That is the first version with the starter files and the preview this guide uses; with an earlier one, steps 3 and 4 fail.
+
+Get a copy of the factory at that version to work from, in a new directory outside the repository you are setting up:
 
 ```
-git clone https://github.com/theaiengineers/factory /tmp/factory && git -C /tmp/factory checkout COMMIT
-python3 -m venv /tmp/factory/.venv
-/tmp/factory/.venv/bin/pip install --require-hashes --only-binary :all: -r /tmp/factory/requirements.txt
+FACTORY=$(mktemp -d)
+git clone https://github.com/theaiengineers/factory "$FACTORY" && git -C "$FACTORY" checkout COMMIT
+python3 -m venv "$FACTORY/.venv"
+"$FACTORY/.venv/bin/pip" install --require-hashes --only-binary :all: -r "$FACTORY/requirements.txt"
 ```
+
+The later steps call this directory `$FACTORY`.
 
 ## Step 3. Write the rules
 
@@ -59,6 +64,8 @@ Copy `starter/factory.yml` from the factory to the root of the repository as `fa
 
 Two files are always high risk whatever the lists say: `factory.yml` itself and the review standard it names.
 
+When the file is filled in, `grep -n CHANGE factory.yml` should find nothing. The gate accepts a file with a placeholder left in; the rule simply never matches.
+
 Set `require` under the `testing` station to the test check names from the readiness report. The gate does not enforce that list yet. It is the record of what step 8 makes required, and it is where a later factory version will read it from.
 
 ## Step 4. Try the rules on changes that have already merged
@@ -66,8 +73,9 @@ Set `require` under the `testing` station to the test check names from the readi
 Before anyone depends on the rules, see what they would have said about recent work. From the root of the repository:
 
 ```
+REPO=$PWD
 gh pr list --state merged --limit 30 --json number,title,files |
-  PYTHONPATH=/tmp/factory /tmp/factory/.venv/bin/python -m factory.preview --rules factory.yml
+  (cd "$FACTORY" && .venv/bin/python -m factory.preview --rules "$REPO/factory.yml")
 ```
 
 It prints one line for each change with its level, then the totals. It calls nothing and changes nothing. If it stops with a one-sentence error, the file has a mistake; fix it and run again.
@@ -79,7 +87,7 @@ Read the output with the owner:
 - A change that shows `none` and touched something that runs: a skip path is too generous.
 - A risk area listed as touched by no change: either a quiet area, or a path that does not match how the repository spells it. Check the path exists.
 
-Change the rules and run it again until the owner is content. Its limits: it sees at most the first 100 files of a change and only the new name of a renamed file, so the real gate can be stricter than this preview on very large changes and on moves.
+Change the rules and run it again until the owner is content. Its limits: it sees at most the first 100 files of a change (it marks a change listed with that many) and only the new name of a renamed file, so the real gate can be stricter than this preview on very large changes and on moves. If the file has no `independent-review` station, the preview says so and shows every change as needing no review, because the gate then checks nothing.
 
 ## Step 5. Add the review standard
 
@@ -93,7 +101,7 @@ Check before you commit:
 
 - Both places carry the same full commit id. A tag name or a branch name there means the code that judges every change can be swapped without a review.
 - The `permissions` block is unchanged. The job needs to write one status and read pull requests, and nothing more.
-- The file is valid YAML.
+- The file is valid YAML: `"$FACTORY/.venv/bin/python" -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' .github/workflows/factory-gate.yml` prints nothing when it is.
 
 If the repository already enforces a review rule of its own and the owner wants to compare before switching, uncomment `context: independent-review-trial`. The gate then reports under that name beside the existing rule, and step 8 leaves it out of the required checks.
 
@@ -112,7 +120,7 @@ A reviewer that posts through a GitHub App does not count, and neither does the 
 
 Then add a short section to the file the repository's agents read at the start of their work. Without it, an authoring agent does not know the line exists. Adapt this:
 
-> **How changes are made here.** Every change goes in by pull request. Run the tests before you open one: `THE TEST COMMAND`. Do not review your own change and do not post a review record for it. When the checks are green, ask for an independent review as `docs/REVIEW_STANDARD.md` describes. A new commit after a review needs a new review. Changes to `factory.yml`, the review standard and the workflows are always high risk. If a check blocks you, say so; do not look for a way round it.
+> **How changes are made here.** Every change goes in by pull request. Run the tests before you open one: `THE TEST COMMAND`. Do not review your own change and do not post a review record for it. When the checks are green, ask for an independent review as `docs/REVIEW_STANDARD.md` describes. A new commit after a review needs a new review. Changes to `factory.yml` and the review standard are always high risk, and so is anything in the risk areas `factory.yml` lists. If a check blocks you, say so; do not look for a way round it.
 
 ## Step 8. Merge, then make the checks required
 

@@ -70,8 +70,23 @@ class Render(unittest.TestCase):
     def test_says_when_there_is_no_review_station(self):
         cfg = config.parse("spec: factory/0.1\n")
         text = preview.render(preview.rows([pr(1, "README.md")], cfg), cfg)
-        self.assertIn("#1  code", text)
-        self.assertIn("no independent-review station", text)
+        self.assertIn("#1  none", text)
+        self.assertIn("the gate checks nothing and passes every change", text)
+
+    def test_no_review_station_is_none_even_in_a_risk_area(self):
+        # What the gate does: review_gate.evaluate_one passes everything when there is no station.
+        cfg = config.parse("spec: factory/0.1\nrisk:\n  - area: payments\n    why: money\n    paths: [api/billing/**]\n")
+        found = preview.rows([pr(1, "api/billing/x.py"), pr(2, "factory.yml")], cfg)
+        self.assertEqual([(r["level"], r["areas"]) for r in found], [("none", []), ("none", [])])
+        text = preview.render(found, cfg)
+        self.assertIn("2 need no review, 0 need a review, 0 are high risk", text)
+        self.assertNotIn("no change here touched", text)
+
+    def test_marks_a_change_that_may_be_cut_short(self):
+        many = preview.rows([pr(1, *[f"src/f{i}.py" for i in range(100)]), pr(2, *[f"src/f{i}.py" for i in range(99)])], self.cfg)
+        lines = preview.render(many, self.cfg).splitlines()
+        self.assertIn("100 files listed: there may be more", lines[0])
+        self.assertNotIn("there may be more", lines[1])
 
 
 class Main(unittest.TestCase):
@@ -106,8 +121,19 @@ class Main(unittest.TestCase):
         self.assertEqual((code, out), (2, ""))
         self.assertIn("factory/0.1", err)
 
+    def test_a_rules_file_that_is_not_text(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "factory.yml")
+            with open(path, "wb") as f:
+                f.write(b"spec: factory/0.1\n# \xff\xfe\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(preview.main(["--rules", path]), 2)
+            self.assertIn("not UTF-8", err.getvalue())
+
     def test_input_that_is_not_the_list(self):
-        for stdin in ("", "{}", "[1]", "not json"):
+        bad_files = [json.dumps([{"number": 1, "files": v}]) for v in ("a.py", ["a.py"], [{"path": 3}], [None])]
+        for stdin in ["", "{}", "[1]", "not json"] + bad_files:
             code, out, err = self.run_main(RULES, stdin)
             self.assertEqual((code, out), (2, ""), stdin)
             self.assertIn("gh pr list", err)

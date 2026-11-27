@@ -44,9 +44,12 @@ gh api repos/OWNER/REPO/actions/permissions
 gh api repos/OWNER/REPO/actions/permissions/selected-actions     # only when allowed_actions is "selected"
 ```
 
-- Ready: `enabled` is true and `allowed_actions` is `all`, or it is `selected` and `patterns_allowed` covers `theaiengineers/factory/*`.
-- Gap: Actions are off, or `allowed_actions` is `local_only`, or the selected list does not cover the factory. An administrator has to allow it.
+- Ready: `enabled` is true and `allowed_actions` is `all`.
+- Gap: Actions are off, or `allowed_actions` is `local_only`. An administrator has to allow outside workflows.
+- Unknown: `allowed_actions` is `selected`. The gate needs two things allowed: the workflow in `theaiengineers/factory`, and `actions/checkout`, which that workflow uses (`github_owned_allowed`, or a pattern for it). Report what the selected list holds and say that only a run settles it: step 9 of the setup guide.
 - Unknown: the commands answer 403 or 404. They need an administrator.
+
+An organisation or enterprise can set a stricter policy than the repository shows. If the repository belongs to one, say that this was not checked unless you could read it (`gh api orgs/ORG/actions/permissions`, which needs an organisation owner).
 
 ### A2. Changes reach the default branch by pull request
 
@@ -86,6 +89,8 @@ gh api repos/OWNER/REPO/branches/BRANCH/protection       # classic protection; n
 
 Report what is there now: which checks are required, whether a pull request is required, and whether administrators or anyone else may bypass the rules.
 
+The first command does not show who may bypass a ruleset, and leaves out rulesets that are only being evaluated. An administrator can read both with `gh api repos/OWNER/REPO/rulesets` and then `gh api repos/OWNER/REPO/rulesets/ID` for each (`bypass_actors`, `enforcement`). For classic protection, `enforce_admins` in the second command says whether administrators are held to the rules. Without admin access, who may bypass is unknown.
+
 - Ready: an administrator is available to make the change in setup. Existing rules are not a problem; setup adds to them.
 - Gap: nobody who can administer the repository is involved, or the plan does not allow protected branches for this repository.
 - Unknown: the second command answers 404 "Not Found" (as distinct from "Branch not protected") or 403. Report the rulesets and say that classic protection could not be read.
@@ -95,7 +100,7 @@ Report what is there now: which checks are required, whether a pull request is r
 The gate counts a review record only from an account with write, maintain or admin permission on the repository. A record posted by a GitHub App, including the workflow's own token, does not count.
 
 ```
-gh api "repos/OWNER/REPO/collaborators?permission=push" --jq '.[].login'     # needs write access to list
+gh api --paginate "repos/OWNER/REPO/collaborators?permission=push" --jq '.[].login'     # needs write access to list
 ```
 
 Ask the owner who, or what, will review: a person, or a fresh agent that is given only the pull request and the review standard.
