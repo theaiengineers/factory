@@ -69,6 +69,8 @@ PROBLEMS = {
           "the day you did it. The reviewer keeps working until the old one actually expires."),
 }
 RESOLVED = "A later health check found this problem gone, so this issue is closed."
+STOPPED = "The factory file no longer names an automatic reviewer, so there is nothing to watch and this issue is closed."
+DAYS_AHEAD = 1                               # a day written in a time zone ahead of UTC is not "in the future"
 
 
 def read_rules(gh) -> dict:
@@ -85,7 +87,8 @@ def check(gh, environ, model: str | None = None, call=reviewer.call_claude, paus
             raise
         return {"state": OFF, "renewed": None, "why": f"there is no {config.FILE} on the default branch"}
     except config.ConfigError as e:
-        return {"state": OFF, "renewed": None, "why": f"the factory file cannot be used ({e})"}
+        # Not "off": a file that cannot be read must not quieten this check. The gate fails on the same file.
+        return {"state": FAILED, "renewed": None, "why": f"the factory file cannot be used ({e})"}
     automatic = (cfg["review"] or {}).get("automatic")
     if not automatic:
         return {"state": OFF, "renewed": None, "why": "the factory file names no automatic reviewer"}
@@ -113,15 +116,16 @@ def check(gh, environ, model: str | None = None, call=reviewer.call_claude, paus
 
 def check_result(result) -> dict:
     """The JSON handed from the check step, checked again. Anything that is not such a result means the check step
-    did not finish, which is reported as a failure to reach the model."""
+    did not finish, which is reported as a failure to reach the model. `known` is false then: nothing was learnt, so
+    nothing may be closed on the strength of it."""
     if not isinstance(result, dict) or result.get("state") not in STATES:
-        return {"state": FAILED, "renewed": None}
+        return {"state": FAILED, "renewed": None, "known": False}
     renewed = result.get("renewed")
     try:
         renewed = datetime.date.fromisoformat(renewed).isoformat() if isinstance(renewed, str) else None
     except ValueError:
         renewed = None
-    return {"state": result["state"], "renewed": renewed}
+    return {"state": result["state"], "renewed": renewed, "known": True}
 
 
 def problems(result: dict, today: datetime.date) -> list[str]:
@@ -131,14 +135,15 @@ def problems(result: dict, today: datetime.date) -> list[str]:
     found = [result["state"]] if result["state"] in PROBLEMS else []
     if result["renewed"]:
         age = (today - datetime.date.fromisoformat(result["renewed"])).days
-        if age >= RENEW_AFTER_DAYS or age < 0:
+        if age >= RENEW_AFTER_DAYS or age < -DAYS_AHEAD:
             found.append(DUE)
     return found
 
 
 def own_issues(gh) -> dict[str, list[int]]:
-    """Open issues this check opened, by kind. Only an issue from the workflow account counts, so nobody else can
-    stop a warning by opening an issue that looks like one."""
+    """Open issues this check opened, by kind. Only an issue from the workflow account counts, so no person and no
+    other app can stop a warning by opening an issue that looks like one. (Another workflow in the same repository
+    posts from the same account; the gate records the same limit for comments.)"""
     found: dict[str, list[int]] = {}
     for issue in gh.pages("issues?state=open", 5000):
         user = issue.get("user") or {}
@@ -156,10 +161,13 @@ def report(gh, result, today: datetime.date | None = None) -> tuple[int, list[st
     cannot work, so the scheduled run also shows red; a renewal that is only due is not a failure."""
     result = check_result(result)
     today = today or datetime.datetime.now(datetime.timezone.utc).date()
-    if result["state"] == OFF:
-        return 0, ["No automatic reviewer to watch."]
-    found = problems(result, today)
     existing = own_issues(gh)
+    if result["state"] == OFF:
+        said = ["No automatic reviewer to watch."]
+        for number in sorted(n for numbers in existing.values() for n in numbers):
+            said.append(close(gh, number, STOPPED))
+        return 0, said
+    found = problems(result, today)
     said = [] if found else ["The automatic reviewer's model credential works."]
     for kind, (title, words) in PROBLEMS.items():
         numbers = existing.get(kind, [])
@@ -169,13 +177,23 @@ def report(gh, result, today: datetime.date | None = None) -> tuple[int, list[st
             else:
                 made = json.loads(gh._request("POST", "issues", {"title": title, "body": MARK % kind + "\n" + words + FOOT}))
                 said.append(f"{title}: opened issue #{made.get('number')}.")
-        elif kind == DUE or result["state"] == WORKING:
-            # A problem with the credential is known to be gone only when the model has answered.
+        elif result["known"] and (kind == DUE or result["state"] == WORKING):
+            # A problem with the credential is known to be gone only when the model has answered, and a renewal is
+            # known not to be due only when the check step said what day the factory file gives.
             for number in numbers:
-                gh._request("POST", f"issues/{number}/comments", {"body": RESOLVED})
-                gh._request("PATCH", f"issues/{number}", {"state": "closed"})
-                said.append(f"Closed issue #{number}: the problem has gone.")
+                said.append(close(gh, number, RESOLVED))
     return (1 if any(kind != DUE for kind in found) else 0), said
+
+
+def close(gh, number: int, words: str) -> str:
+    gh._request("POST", f"issues/{number}/comments", {"body": words})
+    gh._request("PATCH", f"issues/{number}", {"state": "closed"})
+    return f"Closed issue #{number}."
+
+
+def one_line(text) -> str:
+    """Text for the run's log: one line, and nothing GitHub would read as a workflow command."""
+    return " ".join(str(text).split()).replace("::", ": :")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -192,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
         result = check(gh, os.environ, args.model or None)
         with open(args.out, "w", encoding="utf-8") as f:
             json.dump({"state": result["state"], "renewed": result["renewed"]}, f)
-        print(f"Reviewer health: {result['state']} ({result['why']})")
+        print(f"Reviewer health: {result['state']} ({one_line(result['why'])})")
         return 0
     try:
         with open(args.result, encoding="utf-8") as f:
@@ -202,10 +220,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         code, said = report(gh, result)
     except urllib.error.HTTPError as e:
-        state = check_result(result)["state"]
-        print(f"::error::Reviewer health is '{state}', and an issue could not be opened or closed (HTTP {e.code}). "
-              "Issues may be switched off for this repository, or the job lacks `issues: write`.")
-        return 1
+        checked = check_result(result)
+        fine = checked["state"] in (OFF, WORKING) and not problems(checked, datetime.datetime.now(datetime.timezone.utc).date())
+        print(f"::{'warning' if fine else 'error'}::Reviewer health is '{checked['state']}', and issues could not be "
+              f"read, opened or closed (HTTP {e.code}). Issues may be switched off for this repository, or the job "
+              "lacks `issues: write`.")
+        return 0 if fine else 1
     for line in said:
         print(line)
     if code:

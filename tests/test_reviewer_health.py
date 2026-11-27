@@ -87,9 +87,14 @@ class Check(unittest.TestCase):
         self.assertEqual(gh.asked, ["contents/factory.yml"])        # the default branch: no other is named
 
     def test_nothing_is_asked_when_no_automatic_reviewer_is_named(self):
-        for rules in ("spec: factory/0.1\n", "spec: factory/0.1\nintake:\n  - station: qa\n    uses: independent-review\n", None, "not: [valid"):
+        for rules in ("spec: factory/0.1\n", "spec: factory/0.1\nintake:\n  - station: qa\n    uses: independent-review\n", None):
             out, calls, _ = self.go(FakeGitHub(rules))
             self.assertEqual((out["state"], calls), ("off", []), rules)
+
+    def test_a_factory_file_that_cannot_be_used_does_not_quieten_the_check(self):
+        for rules in ("not: [valid", "spec: other/1\n", RULES % "      pases: [code]"):
+            out, calls, _ = self.go(FakeGitHub(rules))
+            self.assertEqual((out["state"], calls), ("failed", []), rules)
 
     def test_no_credential_is_missing(self):
         out, calls, _ = self.go(environ={"PATH": "/bin"})
@@ -121,9 +126,11 @@ class Check(unittest.TestCase):
 class Result(unittest.TestCase):
     def test_only_a_known_state_and_a_real_day_are_kept(self):
         self.assertEqual(health.check_result({"state": "working", "renewed": "2026-11-27", "why": "<b>x</b>"}),
-                         {"state": "working", "renewed": "2026-11-27"})
-        for bad in (None, "", [], {"state": "fine"}, {"renewed": "2026-11-27"}):
-            self.assertEqual(health.check_result(bad), {"state": "failed", "renewed": None}, bad)
+                         {"state": "working", "renewed": "2026-11-27", "known": True})
+        for bad in (None, "", [], {"state": "fine"}, {"renewed": "2026-11-27"}, "x"):
+            self.assertEqual(health.check_result(bad), {"state": "failed", "renewed": None, "known": False}, bad)
+        # `known` cannot be handed in.
+        self.assertTrue(health.check_result({"state": "failed", "known": False})["known"])
         for day in ("soon", 20261127, "2026-02-30", ["2026-11-27"]):
             self.assertIsNone(health.check_result({"state": "working", "renewed": day})["renewed"], day)
 
@@ -135,6 +142,8 @@ class Result(unittest.TestCase):
         self.assertEqual(found("working", "2026-11-27", last_quiet), [])
         self.assertEqual(found("working", "2026-11-27", last_quiet + datetime.timedelta(days=1)), ["renewal-due"])
         self.assertEqual(found("working", "2027-12-25"), ["renewal-due"])           # not a past date
+        self.assertEqual(found("working", "2027-11-02"), [])                        # tomorrow in UTC is today further east
+        self.assertEqual(found("working", "2027-11-03"), ["renewal-due"])
         self.assertEqual(found("working", None), [])
         self.assertEqual(found("refused", "2026-11-27"), ["refused", "renewal-due"])
         self.assertEqual(found("missing", None), ["missing"])
@@ -153,9 +162,26 @@ class Report(unittest.TestCase):
         self.assertEqual((code, gh.sent), (0, []))
         self.assertIn("works", said[0])
 
-    def test_off_does_not_even_look(self):
-        code, _, gh = self.go("off", issues=[issue(3, "refused")])
-        self.assertEqual((code, gh.sent, gh.asked), (0, [], []))
+    def test_off_closes_what_it_opened_and_nothing_else(self):
+        mine = [issue(3, "refused"), issue(4, "renewal-due"), issue(5, "missing")]
+        code, _, gh = self.go("off", issues=mine + [issue(6, "refused", login="mallory", account="User")])
+        self.assertEqual(code, 0)
+        self.assertEqual([(m, p) for m, p, _ in gh.sent], [(m, f"issues/{n}{tail}") for n in (3, 4, 5)
+                                                           for m, tail in (("POST", "/comments"), ("PATCH", ""))])
+        self.assertEqual(gh.sent[0][2], {"body": health.STOPPED})
+        code, _, gh = self.go("off")
+        self.assertEqual((code, gh.sent), (0, []))
+
+    def test_a_check_that_did_not_finish_closes_nothing(self):
+        # No result means no day was read: a renewal issue must not be closed as "gone".
+        mine = [issue(5, "renewal-due"), issue(6, "refused"), issue(7, "missing")]
+        for nothing in (None, "", {"state": "unheard-of"}):
+            gh = FakeGitHub(issues=mine)
+            code, _ = health.report(gh, nothing, TODAY)
+            self.assertEqual((code, [(m, p) for m, p, _ in gh.sent]), (1, [("POST", "issues")]), nothing)
+        # A check that did finish, and read no day, does close it.
+        _, _, gh = self.go("failed", issues=[issue(5, "renewal-due"), issue(8, "failed")])
+        self.assertEqual([(m, p) for m, p, _ in gh.sent], [("POST", "issues/5/comments"), ("PATCH", "issues/5")])
 
     def test_each_problem_opens_one_issue_in_fixed_words(self):
         for kind in ("refused", "missing", "failed"):
@@ -263,8 +289,29 @@ class Main(unittest.TestCase):
             self.assertIn("::error::", said)
             code, said = self.run_main(["report", "--result", path], FakeGitHub(refuse=410))
             self.assertEqual(code, 1)
-            self.assertIn("could not be opened", said)
+            self.assertIn("::error::", said)
             self.assertIn("'refused'", said)
+
+    def test_issues_switched_off_is_only_a_warning_while_the_reviewer_works(self):
+        gh = FakeGitHub()
+        gh.pages = mock.Mock(side_effect=http_error(410))
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "r.json")
+            for state, renewed, code, level in (("working", None, 0, "::warning::"), ("off", None, 0, "::warning::"),
+                                                ("working", "2020-01-01", 1, "::error::"), ("failed", None, 1, "::error::")):
+                with open(path, "w", encoding="utf-8") as f:
+                    json.dump({"state": state, "renewed": renewed}, f)
+                got, said = self.run_main(["report", "--result", path], gh)
+                self.assertEqual(got, code, state)
+                self.assertIn(level, said)
+
+    def test_the_log_line_is_one_line_and_carries_no_command(self):
+        self.assertEqual(health.one_line("bad key\n::error::forged\r\nmore"), "bad key : :error: :forged more")
+        found = {"state": "failed", "renewed": None, "why": "x\n::error::forged"}
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(health, "check", lambda gh, environ, model: found):
+            _, said = self.run_main(["check", "--out", os.path.join(d, "r.json")], FakeGitHub())
+        self.assertEqual(said.count("\n"), 1)
+        self.assertNotIn("::error::", said)
 
     def test_an_empty_result_file_is_reported_as_a_failure(self):
         with tempfile.TemporaryDirectory() as d:

@@ -133,7 +133,7 @@ A subscription token lasts a year. A key can be withdrawn, and a subscription ca
 | No credential is set, though the factory file names an automatic reviewer | Opens an issue, and the run fails |
 | No answer after two tries, and the credential was not refused | Opens an issue saying so, and the run fails. This may be a passing fault |
 
-It opens one issue for each kind of problem and does not open another while that one is open. Only an issue opened by the workflow account counts as "already open", so nobody else can silence a warning. Every word of an issue is fixed in the code. A failed scheduled run is also emailed by GitHub to whoever last changed the schedule.
+It opens one issue for each kind of problem and does not open another while that one is open. Only an issue opened by the workflow account counts as "already open", so no person and no other app can silence a warning by opening a look-alike. If the check itself cannot finish (or the factory file cannot be read), that is reported as "could not reach its model", and nothing is closed on the strength of it. If `automatic` is removed from the factory file, the check closes its open issues and goes quiet. Every word of an issue is fixed in the code. A failed scheduled run is also emailed by GitHub to whoever last changed the schedule.
 
 This tells you the credential has stopped, within one schedule interval. It cannot tell you in advance: a token does not say when it expires, and a workflow cannot read a secret's age.
 
@@ -145,7 +145,7 @@ This tells you the credential has stopped, within one schedule interval. It cann
       credential_renewed: 2026-11-27
 ```
 
-Once that day is 330 days old, the health check opens an issue saying renewal is due, about five weeks before a one-year token expires. The run does not fail for this, and the reviewer keeps working until the token really expires. The day is only as good as the person who writes it down: change it each time you replace the credential, and the issue closes at the next check. Move the gate to v0.4.0 or later before adding this line, because an earlier gate refuses a key it does not know.
+Once that day is 330 days old (or is more than a day in the future, which is taken as a mistake), the health check opens an issue saying renewal is due, about five weeks before a one-year token expires. The run does not fail for this, and the reviewer keeps working until the token really expires. The day is only as good as the person who writes it down: change it each time you replace the credential, and the issue closes at the next check. Move the gate to v0.4.0 or later before adding this line, because an earlier gate refuses a key it does not know.
 
 **Replacing the credential.** Whoever owns it creates a new one (`claude setup-token`, or a new key in the Claude Console) and sets the secret again with `gh secret set NAME`. Then start the health check by hand from the Actions tab: it should pass and close its issue. Pull requests that got the refused notice are not reviewed again by themselves; start the reviewer by hand for each, or push a new commit.
 
