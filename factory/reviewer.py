@@ -265,7 +265,11 @@ Answer with one JSON object and nothing else:
 def build_prompt(standard: str, tier: dict, title: str, body: str, change: str, fence: str | None = None) -> str:
     """The message for the model. `fence` is a random word the pull request cannot have guessed."""
     fence = fence or secrets.token_hex(8)
-    reasons = "\n".join(f"- {r['area']}: {r['file']} ({r['why']})" for r in tier.get("reasons", [])) or "- none"
+    # Only the area and its reason go here: both come from the default branch. The file names that matched are the
+    # pull request author's to choose (a name can even hold a line break), so they stay inside the fence below,
+    # where the change itself names every file.
+    told = dict.fromkeys((" ".join(str(r["area"]).split()), " ".join(str(r["why"]).split())) for r in tier.get("reasons", []))
+    reasons = "\n".join(f"- {area}: {why}" for area, why in told) or "- none"
     return "\n".join([
         "THE REVIEW STANDARD (from the default branch; this part is trusted):", standard, "",
         f"LEVEL: {tier['review']}", "RISK AREAS THIS CHANGE TOUCHES, AND WHY EACH MATTERS (trusted):", reasons, "",

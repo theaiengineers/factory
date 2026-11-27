@@ -106,5 +106,70 @@ class Config(unittest.TestCase):
                 self.assertIn(said, str(caught.exception))
 
 
+class NeverSkip(unittest.TestCase):
+    RULES = """
+spec: factory/0.1
+intake:
+  - station: qa
+    uses: independent-review
+    standard: docs/REVIEW_STANDARD.md
+    skip_when_only: ["**/*.md", docs/**]
+    never_skip: ["**/AGENTS.md", CLAUDE.md, docs/runbooks/**]
+risk:
+  - area: operations
+    why: tells people what to do in an incident
+    paths: [docs/runbooks/**]
+"""
+
+    def level(self, *names, rules=None, renamed_from=None):
+        files = [{"filename": n} for n in names]
+        if renamed_from:
+            files[0]["previous_filename"] = renamed_from
+        return risk.classify(files, config.parse(rules or self.RULES))
+
+    def test_a_named_file_is_reviewed_though_it_matches_the_skip_list(self):
+        for name in ("AGENTS.md", "api/AGENTS.md", "CLAUDE.md"):
+            tier = self.level(name)
+            self.assertEqual((tier["review"], tier["code"], tier["areas"]), ("code", [name], []), name)
+
+    def test_other_prose_is_still_skipped(self):
+        for name in ("README.md", "docs/guide.md", "api/CLAUDE.md", "AGENTS.md.bak.md"):
+            self.assertEqual(self.level(name)["review"], "none", name)
+        self.assertEqual(self.level("README.md", "AGENTS.md")["code"], ["AGENTS.md"])
+
+    def test_inside_a_risk_area_it_is_high(self):
+        tier = self.level("docs/runbooks/outage.md")
+        self.assertEqual((tier["review"], tier["areas"]), ("high", ["operations"]))
+
+    def test_a_rename_is_judged_at_both_ends(self):
+        self.assertEqual(self.level("docs/notes.md", renamed_from="AGENTS.md")["code"], ["AGENTS.md"])
+
+    def test_a_line_break_in_a_name_does_not_take_it_out_of_a_pattern(self):
+        tier = self.level("docs/runbooks/a\nb.md")
+        self.assertEqual((tier["review"], tier["areas"]), ("high", ["operations"]))
+        self.assertEqual(self.level("docs/runbooks/sub\ndir/x.md")["review"], "high")
+        for pattern, name in (("api/billing/**", "api/billing/evil\n.py"), ("**/AGENTS.md", "a\nb/AGENTS.md"), ("**", "a\nb"), ("a**", "a\r\nb/c")):
+            self.assertEqual(risk.first_match(name, [pattern]), pattern, (pattern, name))
+        self.assertIsNone(risk.first_match("a\n/b", ["*"]))                  # `*` still stays inside one segment
+
+    def test_without_the_key_nothing_changes(self):
+        without = self.RULES.replace('    never_skip: ["**/AGENTS.md", CLAUDE.md, docs/runbooks/**]\n', "")
+        self.assertEqual(config.parse(without)["review"]["never_skip"], [])
+        for name in ("AGENTS.md", "docs/runbooks/outage.md"):
+            self.assertEqual(self.level(name, rules=without)["review"], "none", name)
+
+    def test_it_never_lowers_a_level(self):
+        # The factory file and the standard stay high; code stays code.
+        self.assertEqual(self.level("factory.yml")["review"], "high")
+        self.assertEqual(self.level("docs/REVIEW_STANDARD.md")["review"], "high")
+        self.assertEqual(self.level("api/x.py")["review"], "code")
+
+    def test_it_must_be_a_list_of_paths(self):
+        for bad in ("AGENTS.md", "[1]", "['']", "{a: b}"):
+            with self.assertRaises(config.ConfigError, msg=bad) as caught:
+                config.parse("spec: factory/0.1\nintake:\n  - {station: qa, uses: independent-review, never_skip: %s}\n" % bad)
+            self.assertIn("qa.never_skip", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

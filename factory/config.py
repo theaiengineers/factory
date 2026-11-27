@@ -94,6 +94,7 @@ def parse(text: str) -> dict:
                 raise ConfigError(f"intake has more than one {REVIEW} station")
             review = {"station": station["station"], "standard": station.get("standard"),
                       "skip_when_only": _strings(station.get("skip_when_only"), f"{station['station']}.skip_when_only"),
+                      "never_skip": _strings(station.get("never_skip"), f"{station['station']}.never_skip"),
                       "automatic": _automatic(station.get("automatic"), station["station"])}
 
     risk = []
