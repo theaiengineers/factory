@@ -54,7 +54,7 @@ DESCRIPTION_LIMIT = 140          # GitHub's limit on a status description
 # OWNER is taken at its word. `latest_record` then counts the associations below.
 TRUSTED_ASSOCIATIONS = ("OWNER", "COLLABORATOR")
 UNTRUSTED = "NONE"
-RECHECKS = 3                     # times the status is recomputed when the pull requests sharing the commit change
+RECHECKS = 3                     # times the commit is judged again when the answer changes while the gate runs
 WRITE_PERMISSIONS = ("admin", "maintain", "write")
 ATTEMPTS = 3                     # per API call, for a network fault or a 5xx / rate-limit answer
 RETRY_SECONDS = 2
@@ -221,8 +221,11 @@ def load_config(gh, default_branch: str) -> dict:
 def trust_writers(gh, comments: list[dict]) -> list[dict]:
     """Sets the association of every comment that carries (or attempts) a review marker from what the account may
     actually do: COLLABORATOR when it can write to the repository, otherwise untrusted. The permission is asked for
-    once per account. An OWNER is not looked up. A lookup that fails leaves the comment untrusted: the gate then asks
-    for a review, it never passes by accident."""
+    once per account. An OWNER is not looked up.
+
+    An account GitHub does not know (404) cannot write, so its comment is untrusted. Any other failed lookup RAISES,
+    and the gate then says `error`: dropping a record the gate could not check would let an earlier pass stand over
+    later findings."""
     cache: dict[str, bool] = {}
     out = []
     for c in comments:
@@ -230,8 +233,11 @@ def trust_writers(gh, comments: list[dict]) -> list[dict]:
             login = ((c.get("user") or {}).get("login") or "").strip()
             if login and login not in cache:
                 try:
-                    cache[login] = (gh.get(f"collaborators/{login}/permission") or {}).get("permission") in WRITE_PERMISSIONS
-                except Exception:  # noqa: BLE001
+                    answer = gh.get(f"collaborators/{urllib.parse.quote(login, safe='')}/permission")
+                    cache[login] = (answer or {}).get("permission") in WRITE_PERMISSIONS
+                except urllib.error.HTTPError as e:
+                    if e.code != 404:
+                        raise
                     cache[login] = False
             c = {**c, "author_association": "COLLABORATOR" if cache.get(login) else UNTRUSTED}
         out.append(c)
@@ -262,32 +268,17 @@ def evaluate_one(gh: GitHub, pr: dict, cfg: dict) -> dict:
     return {**base, "tier": tier, "state": state, "description": description, "standard": standard}
 
 
-def sharing(gh, head_sha: str) -> list[dict]:
-    """The open pull requests whose head commit is `head_sha`."""
-    return [p for p in gh.pages(f"commits/{head_sha}/pulls", 1000) if p.get("state") == "open" and p["head"]["sha"] == head_sha]
-
-
-def settled(gh, result: dict) -> bool:
-    """True when the open pull requests sharing the head commit are still the ones that were judged.
-
-    Two pull requests can share a head commit, and each has its own run. A run that judged the commit before the
-    second pull request existed could otherwise write its `success` after the other run's `failure`. So the set is
-    read again AFTER the status is written: whichever run writes last sees the full set and corrects the status."""
-    if result.get("judged") is None:
-        return True                      # nothing was judged (an error): there is nothing to compare
-    return sorted(p["number"] for p in sharing(gh, result["head_sha"])) == result["judged"]
-
-
 def evaluate(gh: GitHub, number: int) -> dict:
     """The status for the head commit of pull request `number`: the worst decision among the open pull requests that
     share that head commit. Returns {"open", "head_sha", "state", "description", "results": [one per pull request]}.
     Any failure after the head commit is known becomes the state `error`, so the commit never keeps an earlier success."""
     pr = gh.get(f"pulls/{number}")
     head_sha = pr["head"]["sha"]
-    result = {"pr": number, "open": pr.get("state") == "open", "head_sha": head_sha, "results": [], "judged": None}
+    result = {"pr": number, "open": pr.get("state") == "open", "head_sha": head_sha, "results": []}
     try:
-        siblings = [p for p in sharing(gh, head_sha) if p["number"] != number]
-        result["judged"] = sorted({number} | {p["number"] for p in siblings})
+        # A pull request from a fork is not in this listing, its own included: the one asked about is always judged.
+        siblings = [p for p in gh.pages(f"commits/{head_sha}/pulls", 1000)
+                    if p.get("state") == "open" and p["head"]["sha"] == head_sha and p["number"] != number]
         cfg = load_config(gh, pr["base"]["repo"]["default_branch"])
         result["results"] = [evaluate_one(gh, p, cfg) for p in [pr] + siblings]
     except config.ConfigError as e:
@@ -312,20 +303,21 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="print the decision; set nothing")
     args = ap.parse_args(argv)
     gh = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"])
+    # Judge, write, then judge again. Runs for different pull requests are not serialised, and two pull requests can
+    # share a head commit: a run that judged the commit before a second pull request was opened on it, or before
+    # findings were recorded, could otherwise write its `success` after another run's `failure`. Whichever run writes
+    # last also looks last, and corrects the status if the answer is no longer the one it wrote.
     for attempt in range(1, RECHECKS + 1):
         result = evaluate(gh, args.pr)
         code = report(gh, result, args)
         if args.dry_run or not result["open"] or result["state"] == "error":
             return code
-        try:
-            if settled(gh, result):
-                return code
-        except Exception as e:  # noqa: BLE001
-            print(f"Could not confirm which pull requests share the commit ({type(e).__name__}).")
-            break
-        print(f"The pull requests sharing {result['head_sha'][:7]} changed while it was judged: judging again ({attempt}/{RECHECKS}).")
+        check = evaluate(gh, args.pr)
+        if all(check[k] == result[k] for k in ("head_sha", "state", "description")):
+            return code
+        print(f"The answer for {result['head_sha'][:7]} changed while it was judged: judging again ({attempt}/{RECHECKS}).")
     # Never leave a status that may be stale: say the gate could not decide.
-    description = _fit("Gate could not decide which pull requests share this commit: re-run the review-gate job")
+    description = _fit("Gate could not decide: the answer kept changing while it ran; re-run the review-gate job")
     gh.set_status(result["head_sha"], "error", description, None, args.context)
     print(f"Set {args.context}=error on {result['head_sha']}.")
     return 1
