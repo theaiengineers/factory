@@ -22,6 +22,10 @@ name: review-gate
 # The review record is a pull request comment, so the status is recomputed when a comment is written as well as
 # when a commit is pushed.
 #
+# PINNING. Pin both refs to a full commit id, not a tag, if the status this sets is one you require. Everything this
+# workflow then runs is fixed by that commit: the factory's code, the checkout action (pinned by commit below) and
+# its one dependency (requirements.txt, pinned by version and file hash).
+#
 # SAFETY. The pull request's code is never checked out and never run. The changed files and the comments are read
 # through the API as data, and the rules come from `factory.yml` on the caller's default branch. Nothing here may
 # ever check out `github.event.pull_request.head` or run a file from it.
@@ -54,12 +58,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
         with:
           repository: theaiengineers/factory
           ref: ${{ inputs.factory_ref }}
           persist-credentials: false
-      - run: python3 -m pip install --quiet pyyaml
+      - run: python3 -m pip install --quiet --require-hashes -r requirements.txt
       - name: Set the status
         env:
           GITHUB_TOKEN: ${{ github.token }}
