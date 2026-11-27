@@ -15,6 +15,7 @@ intake:
     uses: independent-review
     standard: docs/REVIEW_STANDARD.md
     skip_when_only: [docs/**, "**/*.md", "**/test_*"]
+    never_skip: ["**/AGENTS.md"]
 
 # What needs extra care, and why.
 risk:

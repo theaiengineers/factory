@@ -42,7 +42,14 @@ What this does not stop: a change that talks the model into missing a real probl
 
 ## Setting it up
 
-Do [stage 1 setup](SETUP.md) first. The automatic reviewer adds four things.
+Do [stage 1 setup](SETUP.md) first. The automatic reviewer adds five things.
+
+Before you start:
+
+- **The files to copy** are in the factory at the commit your workflows are pinned to. Get them as step 2 of the setup guide does (a temporary clone checked out at that commit).
+- **One version for everything.** The reviewer needs v0.3.0 or later, the health check v0.4.0 or later, and all the factory workflows in a repository should carry the same commit id. If your gate is pinned to an older one, move the gate to the newer id in the same pull request, having read what changed.
+- **The pull request that adds all this is high risk** (it changes `factory.yml` and workflows), and the automatic reviewer is not working until it has merged. It needs a person's review, or a fresh agent's, as in step 7 of the setup guide.
+- **Add the two secrets (steps 2 and 3) before that pull request merges.** Merged first, the reviewer runs on every pull request with nothing to reach its model with: it says so in a notice on each one, and reviews nothing.
 
 ### 1. Name it in `factory.yml`
 
@@ -51,6 +58,7 @@ Do [stage 1 setup](SETUP.md) first. The automatic reviewer adds four things.
     uses: independent-review
     standard: docs/REVIEW_STANDARD.md
     skip_when_only: ["**/*.md"]
+    never_skip: ["**/AGENTS.md", "**/CLAUDE.md"]
     automatic:
       account: github-actions[bot]
       passes: [code]            # the default: a high-risk change still needs a person
@@ -92,7 +100,7 @@ The repository's owner adds one secret. The factory never sees it.
 
 Either one is a repository secret, so anyone who can push a branch containing a workflow can make a workflow that uses it. That is the same group who can already write to the repository; give write access accordingly.
 
-If both are set, the key is used. Whoever creates the credential should add it themselves (`gh secret set NAME`, which asks for the value without showing it). An agent setting this up should not create, see or handle it.
+If both are set, the key is used. The starter workflows pass both names on; a secret that is not set arrives empty and is ignored, so both lines can stay. Whoever creates the credential should add it themselves (`gh secret set NAME`, which asks for the value without showing it). An agent setting this up should not create, see or handle it.
 
 Each project uses its own credential in its own repository. Do not run reviews for other people's repositories on your subscription: Anthropic's terms do not allow a subscription to be used on behalf of others.
 
@@ -110,7 +118,7 @@ Copy `starter/factory-reviewer-health.yml` to `.github/workflows/factory-reviewe
 
 Open a pull request with a small real code change. After its required checks pass, a comment headed "Automatic review" should appear and the `independent-review` status should turn. Then try a change inside a risk area: with `passes: [code]` the status should say the automatic review passed and a person's review is still needed.
 
-If nothing appears, read the reviewer workflow's run. Its log says in one line why it did not review. A missing model credential shows as a warning on the run; a refused one gets a notice on the pull request; a missing reviewer key fails the record job. If the status turns and later turns back, the gate workflow has not been given the key: the reviewer's own run of the gate has it, and the gate workflow's next run does not.
+If no record appears, look first for a notice on the pull request: a missing model credential and a refused one each get one, in plain words. The reviewer's run is green in both cases, with a warning on it. Otherwise read the reviewer workflow's run; the `Review` step's log says in one line (starting "No review:") why it did not review. A missing reviewer key fails the record job, but only once there is a review to record. If the status turns and later turns back, the gate workflow has not been given the key: the reviewer's own run of the gate has it, and the gate workflow's next run does not.
 
 ## What it costs
 

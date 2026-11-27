@@ -36,7 +36,7 @@ intake:
 | `uses` | What performs the step. Built in: `checks` (named CI checks must pass) and `independent-review` (a reviewer other than the author must record a pass for the head commit) |
 | `require` | For `checks`: the check names that must pass |
 | `standard` | For `independent-review`: the document reviewers follow |
-| `skip_when_only` | The station is skipped when a change touches nothing outside these paths |
+| `skip_when_only` | The station is skipped when a change touches nothing outside these paths, unless one of them is listed under `never_skip` |
 | `never_skip` | For `independent-review`: paths that are reviewed even though `skip_when_only` matches them. For prose that steers the work, such as `AGENTS.md`. Such a path is judged like any other: it needs a review, and it is high risk if it is inside a risk area. From v0.5.0; an earlier gate ignores the key and skips the path |
 | `automatic` | For `independent-review`: the automatic reviewer whose records count. `account` is the bot login it posts from, such as `github-actions[bot]`; a person's login is refused. `passes` lists the levels its pass counts for: `[code]` (the default) or `[code, high]`. Its findings always count. A record from that account counts only when it is signed with the repository's reviewer key. `credential_renewed` (optional, a day written `YYYY-MM-DD`) is when the model credential was last created; the reviewer health check uses it to warn that renewal is due, and the gate ignores it. See [the automatic reviewer](../docs/AUTOMATIC_REVIEWER.md) |
 
