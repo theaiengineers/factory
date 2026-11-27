@@ -67,7 +67,7 @@ Two files are always high risk whatever the lists say: `factory.yml` itself and 
 
 The preview in step 4 follows `never_skip` too, so it shows what the list does.
 
-When the file is filled in, delete the starter's comments about replacing values; `grep -n CHANGE factory.yml` should then find nothing. The gate accepts a file with a placeholder left in; the rule simply never matches.
+When the file is filled in, delete the starter's comments about replacing values; `grep -n CHANGE factory.yml` should then find nothing. The gate accepts a file with a placeholder left in: a placeholder path never matches, and a placeholder `why` is shown to reviewers as it stands.
 
 Set `require` under the `testing` station to the test check names from the readiness report. The gate does not enforce that list yet. It is the record of what step 8 makes required, and it is where a later factory version will read it from.
 
