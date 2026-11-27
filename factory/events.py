@@ -15,10 +15,16 @@ fixed with it, and nothing that can be edited afterwards, such as a title, is ca
 same events with the same ids, and a reader that keeps one event for each id can be fed overlapping exports (the
 spec's "repeats are harmless").
 
+Events are written only from what has settled. A check run that is still waiting for a machine is not read, because
+GitHub changes its start time when it really starts.
+
 Two things are read as they are at the time of the export, and so can differ between two exports of one event: who
 (`actor`), since an account can be renamed, and the link to the review record (`evidence`), since a comment can be
 deleted, after which the gate is named in its place. And a later export can hold fewer events than an earlier one:
 a force-push removes commits, and GitHub keeps only the last time a pull request was closed.
+
+The station names and the list of required checks are part of the ids. Change either in the factory file and the
+same history comes out as new events with new ids, beside the ones an earlier export gave.
 
 What it cannot see, because GitHub does not keep it or the gate never said it:
   - when a commit was pushed. `change.updated` carries the commit's own date, which the author's machine set;
@@ -83,7 +89,7 @@ DECISIONS = (
 
 def decision(state: str, description: str | None) -> tuple[str, str, str]:
     """(kind, reason code, sentence) for one status the gate set."""
-    if state == "error":
+    if state == "error" and (description or "").startswith("Gate could not decide"):
         return ERROR, "review.error", "The review gate could not decide"
     for start, kind, code, text in DECISIONS:
         if (description or "").startswith(start) and state == ("success" if kind in (SKIPPED, PASSED) else "failure"):
@@ -148,26 +154,30 @@ def testing_events(out: Writer, gh, number: int, sha: str, station: str, names: 
     idle; `station.finished` each time every required name has a standing run and all of them have finished. A
     re-run after a failure is therefore a second entry and a second finish, and the first pair stays in the record.
 
-    Within one second, a run that started earlier finishes before another starts, so a failure and the re-run that
-    begins in the same second are both seen."""
+    Only a run that is running or has finished is read. While a run waits for a machine, GitHub gives it a start
+    time that it replaces when the run really starts; an event written from that would change later.
+
+    Within one second, runs are taken in the order GitHub made them (a re-run is always made after the run it
+    repeats), each one's start before its finish. So a failure and the re-run that begins in the same second are
+    both seen."""
     if not names:
         return
     moments = []
     for r in check_runs(gh, sha):
         started, ident = r.get("started_at"), r.get("id")
-        if r.get("name") not in names or not started or ident is None:
+        if r.get("name") not in names or not started or ident is None or r.get("status") not in ("in_progress", "completed"):
             continue
-        moments.append((started, 1, ident, False, r))
+        moments.append((started, ident, False, r))
         if r.get("status") == "completed" and r.get("completed_at"):
-            ended = max(started, r["completed_at"])      # a finish dated before its own start is taken as at the start
-            moments.append((ended, 0 if started < ended else 2, ident, True, r))
+            moments.append((max(started, r["completed_at"]), ident, True, r))     # a finish dated before its start: at the start
     checks, standing, done, busy = {"kind": "system", "id": "checks"}, {}, set(), False
-    for when, _, ident, finished, r in sorted(moments, key=lambda m: m[:3]):
+    required = ",".join(sorted(names))       # in the ids: a different list of required checks asks a different question
+    for when, ident, finished, r in sorted(moments, key=lambda m: m[:3]):
         if not finished:
             standing[r["name"]] = r
             if not busy:
                 busy = True
-                out.add("station.entered", when, number, sha, ("check run", ident, "entered", station), station=station, actor=checks)
+                out.add("station.entered", when, number, sha, ("check run", ident, "entered", station, required), station=station, actor=checks)
             continue
         done.add(ident)
         if standing.get(r["name"]) is not r:
@@ -177,7 +187,7 @@ def testing_events(out: Writer, gh, number: int, sha: str, station: str, names: 
             continue
         busy = False
         failed = sorted({c["name"] for c in current if c.get("conclusion") not in reviewer.PASSED_CONCLUSIONS})
-        out.add("station.finished", when, number, sha, ("check run", ident, "finished", station), station=station,
+        out.add("station.finished", when, number, sha, ("check run", ident, "finished", station, required), station=station,
                 outcome="failed" if failed else "pass", actor=checks, evidence=r.get("html_url") if isinstance(r.get("html_url"), str) else None,
                 reason={"code": "checks.failed", "text": "A required check did not pass"} if failed else None,
                 data={"factory": {"checks": sorted(names), **({"failed": failed} if failed else {})}})
@@ -197,7 +207,7 @@ def review_events(out: Writer, gh, number: int, sha: str, station: str, context:
         if said == last:
             continue
         last, when, link = said, s["created_at"], s.get("target_url") if isinstance(s.get("target_url"), str) else None
-        gate, src = {"kind": "system", "id": "review gate"}, ("status", s["id"])
+        gate, src = {"kind": "system", "id": "review gate"}, ("status", s["id"], station)
         if waiting_for_person and kind != PERSON:
             out.add("action.cleared", when, number, sha, (*src, "cleared"), station=station, actor=gate, evidence=link)
             waiting_for_person = False
@@ -342,7 +352,7 @@ def problems(event) -> list[str]:
     if type_ == "station.finished":
         if event.get("outcome") not in OUTCOMES:
             found.append("`outcome` on station.finished must be one the spec lists")
-    elif "outcome" in event:
+    elif event.get("outcome") is not None:
         found.append("`outcome` belongs only on station.finished")
     needs_reason = type_ in ("shipment.held", "shipment.rolled_back", "action.needed") or event.get("outcome") in ("sent_back", "held")
     reason = event.get("reason")
@@ -356,7 +366,7 @@ def problems(event) -> list[str]:
     actor = event.get("actor")
     if actor is not None and (not isinstance(actor, dict) or actor.get("kind") not in ACTOR_KINDS):
         found.append("`actor.kind` must be agent, person or system")
-    if "data" in event and not isinstance(event["data"], dict):
+    if event.get("data") is not None and not isinstance(event["data"], dict):
         found.append("`data` must be an object")
     return found
 
@@ -370,7 +380,7 @@ def check_lines(lines) -> tuple[int, list[str]]:
         count += 1
         try:
             event = json.loads(line)
-        except (json.JSONDecodeError, RecursionError):
+        except (ValueError, RecursionError):           # ValueError: not JSON, or a number too long to read
             said.append(f"line {n}: not JSON")
             continue
         said += [f"line {n}: {p}" for p in problems(event)]
@@ -422,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
     except urllib.error.HTTPError as e:
         print("GitHub has no such pull request, or the token cannot read it." if e.code == 404
               else f"GitHub refused a request (HTTP {e.code}); nothing was written.", file=sys.stderr)
+        return 2
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+        print("GitHub could not be reached, or its answer could not be read; nothing was written.", file=sys.stderr)
         return 2
     for event in found:
         sys.stdout.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")

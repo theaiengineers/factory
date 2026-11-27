@@ -123,6 +123,7 @@ class Words(unittest.TestCase):
             seen.add(description.split(A[:7])[0][:20])
         self.assertGreaterEqual(len(seen), 7)
         self.assertEqual(events.decision("error", "Gate could not decide: x")[0], events.ERROR)
+        self.assertEqual(events.decision("error", "Something else broke")[0], events.UNKNOWN)
 
     def test_words_that_are_not_the_gates_are_not_trusted(self):
         for state, description in (("success", "LGTM"), ("success", None), ("failure", "Review record for abc says pass"),
@@ -316,6 +317,33 @@ class Testing(unittest.TestCase):
         self.assertEqual([(e["type"], e.get("outcome")) for e in found],
                          [("station.entered", None), ("station.finished", "failed"), ("station.entered", None), ("station.finished", "pass")])
 
+    def test_a_run_waiting_for_a_machine_is_not_read(self):
+        # GitHub gives a queued run a start time and changes it when the run really starts.
+        queued = {**run("tests", "2026-01-15T12:10:00Z"), "status": "queued"}
+        self.assertEqual(self.station([queued]), [])
+        started = self.station([run("tests", "2026-01-15T12:14:30Z")])
+        self.assertEqual([(e["type"], e["time"]) for e in started], [("station.entered", "2026-01-15T12:14:30Z")])
+        # ...and one queued behind a failure does not change what the failure left.
+        self.assertEqual(self.station(self.FIRST + [{**run("tests", "2026-01-15T12:10:00Z", ident=5), "status": "queued"}]), self.station(self.FIRST))
+
+    def test_a_run_that_fails_within_a_second_and_is_rerun_in_that_second(self):
+        at = "2026-01-15T12:06:00Z"
+        found = self.station([run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2), run("tests", at, at, conclusion="failure", ident=3),
+                              run("tests", at, "2026-01-15T12:07:00Z", ident=5)])
+        self.assertEqual([(e["type"], e.get("outcome")) for e in found],
+                         [("station.entered", None), ("station.finished", "failed"), ("station.entered", None), ("station.finished", "pass")])
+
+    def test_a_changed_list_of_required_checks_or_station_name_gives_new_ids(self):
+        runs = [run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"), run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)]
+        said = {A: [status("2026-01-15T12:06:00Z", "success", "No code changed: no independent review needed")]}
+        base = export(FakeGitHub([pull()], runs={A: runs}, statuses=said), numbers=[12])
+        fewer = export(FakeGitHub([pull()], runs={A: runs}, statuses=said), rules=RULES.replace("[tests, lint]", "[lint]"), numbers=[12])
+        renamed = export(FakeGitHub([pull()], runs={A: runs}, statuses=said), rules=RULES.replace("station: qa", "station: review"), numbers=[12])
+        ids = lambda found, station: {e["id"] for e in found if e.get("station") == station}      # noqa: E731
+        self.assertFalse(ids(base, "testing") & ids(fewer, "testing"))
+        self.assertFalse(ids(base, "qa") & ids(renamed, "review"))
+        self.assertEqual(events.check_lines(json.dumps(e) for e in base + fewer + renamed)[1], [])
+
     def test_the_newest_run_of_a_name_stands_whichever_suite_it_is_in(self):
         # Closed and reopened: the same name runs again in a new suite. The old failure does not stand for ever.
         found = self.station(self.FIRST + [run("tests", "2026-01-15T12:10:00Z", "2026-01-15T12:11:00Z", suite=2, ident=5),
@@ -336,9 +364,9 @@ class Testing(unittest.TestCase):
         rng = random.Random(7)
         second = lambda n: f"2026-01-15T12:{n // 60:02d}:{n % 60:02d}Z"      # noqa: E731
         for _ in range(300):
-            runs = []
+            runs, start = [], 0
             for ident in range(1, rng.randint(2, 8)):
-                start = rng.randint(0, 12)
+                start += rng.randint(0, 3)               # GitHub makes runs in order, so a later id never starts earlier
                 end = start + rng.randint(0, 4) if rng.random() < 0.85 else None
                 runs.append(run(rng.choice(["tests", "lint"]), second(start), second(end) if end is not None else None,
                                 conclusion=rng.choice(["success", "failure", "cancelled"]), suite=rng.randint(1, 2), ident=ident))
@@ -347,6 +375,9 @@ class Testing(unittest.TestCase):
                 seen = [({**r, "completed_at": None, "status": "in_progress", "conclusion": None}
                          if r["completed_at"] and r["completed_at"] > second(moment) else r)
                         for r in runs if r["started_at"] <= second(moment)]
+                # Runs not yet started are there too, waiting, with the start time GitHub invents for them.
+                seen += [{**r, "started_at": second(moment), "completed_at": None, "status": "queued", "conclusion": None}
+                         for r in runs if r["started_at"] > second(moment) and rng.random() < 0.5]
                 found = self.station(seen)
                 now = {e["id"]: e for e in found}
                 self.assertEqual(len(now), len(found))
@@ -446,6 +477,8 @@ class Check(unittest.TestCase):
         self.assertIn("line 3: not JSON", said[0])
         self.assertIn("line 4: the id was used earlier for a different event", said[1])
         self.assertEqual(events.check_lines(["[" * 100_000])[1], ["line 1: not JSON"])
+        self.assertEqual(events.check_lines(["9" * 5000])[1][0], "line 1: not JSON")
+        self.assertEqual(events.problems({**GOOD, "type": "station.entered", "outcome": None, "data": None}), [])
 
 
 class Main(unittest.TestCase):
@@ -490,6 +523,10 @@ class Main(unittest.TestCase):
         self.assertEqual((code, out), (2, ""))
         self.assertIn("HTTP 401", err)
         self.assertEqual(self.run_main(["export", "--since", "2026-99-99T00:00:00Z"], self.gh())[0], 2)
+        gh.get = mock.Mock(side_effect=urllib.error.URLError("no network"))
+        code, out, err = self.run_main(["export"], gh)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("could not be reached", err)
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             self.assertEqual(events.main(["export"]), 2)
