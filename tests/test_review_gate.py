@@ -9,6 +9,7 @@ from unittest import mock
 from factory import review_gate, risk
 
 HEAD = "a" * 40
+NEW = "c" * 40
 OLD = "b" * 40
 HIGH = {"review": "high", "areas": ["payments"], "files": 1, "code": ["api/billing/charge.py"],
         "reasons": [{"area": "payments", "file": "api/billing/charge.py", "rule": "api/billing/**", "why": "moves money"}]}
@@ -145,10 +146,11 @@ class FakeGitHub:
         self.prs, self.state, self.fail_on, self.statuses, self.comment_reads, self.file_reads = prs, state, fail_on, [], 0, []
         self.permissions, self.permission_reads, self.sibling_reads, self.arrives = {"reviewer": "write"}, [], 0, {}
         self.fork, self.unknown, self.later_comments = False, (), {}
+        self.heads, self.moves = {}, {}
         self.paths, self.pr_reads, self.closed, self.closes, self.pr_read_fails_at, self.lookup_error = [], 0, set(), {}, None, None
 
     def _pr(self, number):
-        return {"number": number, "state": "closed" if number in self.closed else self.state, "head": {"sha": HEAD},
+        return {"number": number, "state": "closed" if number in self.closed else self.state, "head": {"sha": self.heads.get(number, HEAD)},
                 "base": {"ref": self.prs[number][0], "sha": OLD, "repo": {"default_branch": "main"}}}
 
     def _maybe_fail(self, what):
@@ -175,6 +177,8 @@ class FakeGitHub:
             raise OSError("HTTP 502 on the pull request")
         if self.closes.get(number) == self.pr_reads:                 # closed or merged while the gate runs
             self.closed.add(number)
+        if self.moves.get(number, (None,))[0] == self.pr_reads:      # a new commit pushed while the gate runs
+            self.heads[number] = self.moves[number][1]
         return self._pr(number)
 
     def pages(self, path, limit):
@@ -184,7 +188,8 @@ class FakeGitHub:
             for number, (after, pr) in list(self.arrives.items()):      # a pull request opened while the gate runs
                 if self.sibling_reads > after:
                     self.prs[number] = pr
-            return [] if self.fork else [self._pr(n) for n in self.prs]
+            sha = path.split("/")[1]
+            return [] if self.fork else [p for p in (self._pr(n) for n in self.prs) if p["head"]["sha"] == sha]
         number = int(path.split("/")[1])
         if path.endswith("/files"):
             self._maybe_fail("files")
@@ -289,6 +294,15 @@ class Evaluate(unittest.TestCase):
         self.assertEqual(result["state"], "failure")
         self.assertIn("#8 into main", result["description"])
 
+    def test_a_closed_pull_request_is_not_judged_when_open_ones_share_its_commit(self):
+        gh = FakeGitHub({7: ("side", BILLING, []), 8: ("main", DOCS, [])})
+        gh.closed = {7}
+        result = review_gate.evaluate(gh, 7)
+        self.assertEqual(([r["pr"] for r in result["results"]], result["state"]), ([8], "success"))
+        alone = one(BILLING, state="closed")
+        result = review_gate.evaluate(alone, 7)
+        self.assertEqual(([r["pr"] for r in result["results"]], result["state"]), ([7], "failure"))
+
     def test_any_failure_to_read_is_an_error_never_a_pass(self):
         for what in ("siblings", "files", "comments", "commit"):
             with self.subTest(what=what):
@@ -356,6 +370,62 @@ class Main(unittest.TestCase):
         code, _ = self.run_main(gh)
         self.assertEqual((code, [s[1] for s in gh.statuses]), (0, ["success", "failure"]))
         self.assertIn("No independent review recorded", gh.statuses[-1][2])
+
+    def test_merged_between_the_write_and_the_first_look_back(self):
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {8: (1, ("main", BILLING, []))}
+        gh.closes = {7: 2}                       # the very next read of #7 after the write
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (0, ["success", "failure"]))
+
+    def test_a_correction_written_for_a_closed_pull_request_is_itself_looked_at_again(self):
+        # After the forced `failure`, findings on #8 are answered by a pass: the run that owns the status follows it.
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {8: (1, ("main", BILLING, []))}
+        gh.closes = {7: 2}
+        gh.later_comments = {8: (2, [posted(marker())])}      # the pass lands after the corrected judging has read #8
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (0, ["success", "failure", "success"]))
+
+    def test_a_stale_pass_on_the_old_commit_is_corrected_when_the_pull_request_gets_a_new_head(self):
+        # #7 and #8 are different branches at the same commit. #7's run writes a stale `success` there, then #7 is
+        # pushed to a new commit before the gate looks again. #8 is still on the old commit and still needs a review.
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {8: (1, ("main", BILLING, []))}
+        gh.moves = {7: (2, NEW)}
+        code, out = self.run_main(gh)
+        self.assertEqual((code, [(s[0], s[1]) for s in gh.statuses]), (0, [(HEAD, "success"), (HEAD, "failure"), (NEW, "success")]))
+        self.assertIn("for the pull requests still on it", out)
+
+    def test_a_new_head_with_nobody_left_on_the_old_commit_leaves_the_old_status(self):
+        gh = one(BILLING, [posted(marker())])
+        gh.moves = {7: (2, NEW)}
+        code, out = self.run_main(gh)
+        self.assertEqual((code, [(s[0], s[1]) for s in gh.statuses]), (0, [(HEAD, "success"), (NEW, "failure")]))
+        self.assertIn("no open pull request is on it", out)
+
+    def test_failing_to_judge_the_old_commit_after_a_new_head_marks_it_an_error(self):
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {8: (1, ("main", BILLING, []))}
+        gh.moves = {7: (2, NEW)}
+        real = gh.pages
+
+        def pages(path, limit):
+            if path == f"pulls/8/files":
+                raise OSError("HTTP 502")
+            return real(path, limit)
+        gh.pages = pages
+        code, _ = self.run_main(gh)
+        self.assertEqual([(s[0], s[1]) for s in gh.statuses], [(HEAD, "success"), (HEAD, "error"), (NEW, "success")])
+
+    def test_a_change_of_wording_alone_is_written_again(self):
+        # Same state, different reason: no record at first, then findings. The status must say the current reason.
+        gh = one(BILLING)
+        gh.later_comments = {7: (1, [posted(marker(verdict="findings"))])}
+        code, _ = self.run_main(gh)
+        self.assertEqual([s[1] for s in gh.statuses], ["failure", "failure"])
+        self.assertIn("No independent review recorded", gh.statuses[0][2])
+        self.assertIn("open findings", gh.statuses[1][2])
 
     def test_a_pull_request_closed_before_the_gate_ever_wrote_sets_nothing(self):
         gh = one(BILLING, state="closed")

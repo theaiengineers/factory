@@ -314,13 +314,22 @@ def main(argv: list[str] | None = None) -> int:
     # Once this run has written a status it owns that status. From then on a changed answer is written even if the
     # pull request has been closed or merged meanwhile (a stale `success` is exactly what triggers an auto-merge),
     # and a failure to judge again ends in `error`, never in a status this run wrote and could not confirm.
-    wrote = None                     # the head commit this run has written a status on
+    #
+    # The pull request can also get a new head commit while the gate runs. This run can then no longer judge the old
+    # commit through this pull request, but another pull request may still be on it: `hand_over` judges the old commit
+    # for whichever open pull requests remain there.
+    wrote = None                     # the head commit whose status this run last wrote
+    owned = False                    # this run has written a status and must not leave it wrong
     try:
         for attempt in range(1, RECHECKS + 1):
             result = evaluate(gh, args.pr)
-            code = report(gh, result, args, force=wrote is not None)
-            if args.dry_run or (wrote is None and not result["open"]):
+            if wrote is not None and result["head_sha"] != wrote:
+                hand_over(gh, wrote, args)
+                wrote = None
+            code = report(gh, result, args, force=owned)
+            if args.dry_run or (not owned and not result["open"]):
                 return code
+            owned = True
             wrote = result["head_sha"]
             if result["state"] == "error":
                 return code
@@ -338,6 +347,28 @@ def main(argv: list[str] | None = None) -> int:
     gh.set_status(wrote, "error", _fit(f"Gate could not decide: {why}; re-run the review-gate job"), None, args.context)
     print(f"Set {args.context}=error on {wrote}.")
     return 1
+
+
+def hand_over(gh, old_sha: str, args) -> None:
+    """Corrects the status this run wrote on `old_sha` once the pull request it was judging has moved to another
+    commit. The open pull requests still on the old commit are judged and that answer is written. With none (as far
+    as GitHub's listing shows), the commit is no pull request's head and its status is left. A failure to judge it
+    is written as `error`."""
+    try:
+        still = [p["number"] for p in gh.pages(f"commits/{old_sha}/pulls", 1000)
+                 if p.get("state") == "open" and p["head"]["sha"] == old_sha]
+        if not still:
+            print(f"The pull request moved off {old_sha[:7]} and no open pull request is on it: its status is left.")
+            return
+        result = evaluate(gh, still[0])
+        if result["head_sha"] != old_sha:
+            print(f"#{still[0]} moved off {old_sha[:7]} too: its own run judges it.")
+            return
+        state, description = result["state"], result["description"]
+    except Exception as e:  # noqa: BLE001
+        state, description = "error", _fit(f"Gate could not decide ({type(e).__name__}): re-run the review-gate job")
+    gh.set_status(old_sha, state, description, None, args.context)
+    print(f"The pull request moved off {old_sha[:7]}: set {args.context}={state} there for the pull requests still on it.")
 
 
 def report(gh, result: dict, args, force: bool = False) -> int:
