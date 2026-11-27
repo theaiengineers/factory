@@ -5,8 +5,8 @@
     high   a risk area was touched, or the factory file itself: a review, and release gates hold
 
 A path the review station skips never raises the level, even inside a risk area: a test beside sensitive code is
-still a test. The factory file is the one exception. It holds the rules that judge every change, so a change to it
-is always high.
+still a test. There are two exceptions, both always high whatever the skip paths say: the factory file, which holds
+the rules that judge every change, and the review standard the factory file names, which is what reviewers follow.
 """
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from . import config
 NONE, CODE, HIGH = "none", "code", "high"
 RULES_AREA = "factory rules"
 RULES_WHY = "changes the rules that judge every change"
+STANDARD_WHY = "is the standard reviewers follow; a change here can weaken every review"
 
 
 @functools.lru_cache(maxsize=None)
@@ -53,6 +54,7 @@ def classify(files: list[dict], cfg: dict) -> dict:
     Returns {"review": none|code|high, "files": n, "areas": [...], "reasons": [{area, file, rule, why}], "code": [paths]}.
     """
     skip = (cfg.get("review") or {}).get("skip_when_only", [])
+    standard = (cfg.get("review") or {}).get("standard")
     reasons, code = [], []
     for f in files:
         # A rename is judged at both ends: moving a file out of a risk area changes that area.
@@ -60,6 +62,10 @@ def classify(files: list[dict], cfg: dict) -> dict:
             if name == config.FILE:
                 code.append(name)
                 reasons.append({"area": RULES_AREA, "file": name, "rule": config.FILE, "why": RULES_WHY})
+                continue
+            if standard and name == standard:
+                code.append(name)
+                reasons.append({"area": RULES_AREA, "file": name, "rule": "the review standard", "why": STANDARD_WHY})
                 continue
             if first_match(name, skip):
                 continue

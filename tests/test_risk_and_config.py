@@ -62,6 +62,13 @@ class Classify(unittest.TestCase):
         tier = risk.classify(moved, CFG)
         self.assertEqual((tier["review"], tier["areas"]), (risk.HIGH, ["payments"]))
 
+    def test_the_review_standard_named_in_the_factory_file_is_always_high_though_docs_are_skipped(self):
+        tier = risk.classify(files("docs/REVIEW_STANDARD.md", "docs/other.md"), CFG)
+        self.assertEqual((tier["review"], tier["areas"], tier["code"]), (risk.HIGH, [risk.RULES_AREA], ["docs/REVIEW_STANDARD.md"]))
+        self.assertEqual(tier["reasons"][0]["rule"], "the review standard")
+        no_standard = config.parse("spec: factory/0.1\nintake:\n  - {station: qa, uses: independent-review, skip_when_only: ['docs/**']}\n")
+        self.assertEqual(risk.classify(files("docs/REVIEW_STANDARD.md"), no_standard)["review"], risk.NONE)
+
     def test_the_factory_file_is_always_high_even_when_a_skip_pattern_covers_it(self):
         cfg = config.parse("spec: factory/0.1\nintake:\n  - {station: qa, uses: independent-review, skip_when_only: ['**']}\n")
         self.assertEqual(risk.classify(files("anything.py"), cfg)["review"], risk.NONE)

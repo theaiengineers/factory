@@ -268,22 +268,28 @@ def evaluate_one(gh: GitHub, pr: dict, cfg: dict) -> dict:
     return {**base, "tier": tier, "state": state, "description": description, "standard": standard}
 
 
-def evaluate(gh: GitHub, number: int) -> dict:
-    """The status for the head commit of pull request `number`: the worst decision among the open pull requests that
-    share that head commit. Returns {"open", "head_sha", "state", "description", "results": [one per pull request]}.
-    Any failure after the head commit is known becomes the state `error`, so the commit never keeps an earlier success."""
+def evaluate(gh: GitHub, number: int, sha: str | None = None) -> dict:
+    """The status for one commit: the worst decision among the open pull requests whose head commit it is.
+
+    The commit is `sha`, or the current head of pull request `number` when `sha` is not given. Every open pull
+    request GitHub lists on the commit is judged. The pull request asked about is added when it is open and on the
+    commit but missing from the listing, which is always so for a pull request from a fork.
+
+    Returns {"pr", "open", "head_sha", "state", "description", "results": [one per pull request judged]}. `state` is
+    None when no open pull request is on the commit: there is nothing to judge and nothing should be written.
+    Reading the pull request itself can raise. Any failure after that becomes the state `error`, so the commit
+    never keeps an earlier success."""
     pr = gh.get(f"pulls/{number}")
-    head_sha = pr["head"]["sha"]
-    result = {"pr": number, "open": pr.get("state") == "open", "head_sha": head_sha, "results": []}
+    head_sha = sha or pr["head"]["sha"]
+    result = {"pr": number, "open": pr.get("state") == "open", "head_sha": head_sha, "results": [], "state": None, "description": ""}
     try:
-        # A pull request from a fork is not in this listing, its own included: the one asked about is always judged.
-        siblings = [p for p in gh.pages(f"commits/{head_sha}/pulls", 1000)
-                    if p.get("state") == "open" and p["head"]["sha"] == head_sha and p["number"] != number]
+        subjects = [p for p in gh.pages(f"commits/{head_sha}/pulls", 1000) if p.get("state") == "open" and p["head"]["sha"] == head_sha]
+        if result["open"] and pr["head"]["sha"] == head_sha and number not in [p["number"] for p in subjects]:
+            subjects.insert(0, pr)
+        if not subjects:
+            return result
         cfg = load_config(gh, pr["base"]["repo"]["default_branch"])
-        # A closed pull request no longer needs anything of the commit: the open ones sharing it are judged. With
-        # none of those, the pull request asked about is judged, so there is always an answer.
-        subjects = ([pr] if result["open"] else []) + siblings
-        result["results"] = [evaluate_one(gh, p, cfg) for p in subjects or [pr]]
+        result["results"] = [evaluate_one(gh, p, cfg) for p in subjects]
     except config.ConfigError as e:
         result.update(state="error", exception=e, description=_fit(f"Gate could not decide: {e}"))
         return result
@@ -299,6 +305,48 @@ def evaluate(gh: GitHub, number: int) -> dict:
     return result
 
 
+def settle(gh, number: int, sha: str, args) -> int:
+    """Judges commit `sha`, writes its status, then judges it again, until what was written is what is found.
+
+    Runs for different pull requests are not serialised, and several pull requests can share a head commit. A run
+    that judged the commit before a second pull request was opened on it, or before findings were recorded, could
+    otherwise write its `success` after another run's `failure`. So every write is followed by another look:
+    whichever run writes last also looks last, and corrects the status if the answer is no longer the one it wrote.
+
+    The commit is fixed for the whole of this function. Pull requests may leave it (a new push, a merge, a close)
+    while it runs; each look judges whichever open pull requests are on it at that moment. When none is left the
+    commit is no pull request's head, nothing more is written, and what is there is left.
+
+    Once this function has written, it never leaves a status it could not confirm: if it cannot look again, or the
+    answer keeps changing, it writes `error`. Returns the job's exit code."""
+    wrote = False
+    try:
+        for attempt in range(1, RECHECKS + 1):
+            result = evaluate(gh, number, sha)
+            if result["state"] is None:
+                print(f"No open pull request is on {sha[:7]}: no status set.")
+                return 0
+            code = report(gh, result, args)
+            if args.dry_run:
+                return code
+            wrote = True
+            if result["state"] == "error":
+                return code
+            check = evaluate(gh, number, sha)
+            if check["state"] is None or all(check[k] == result[k] for k in ("state", "description")):
+                return code
+            print(f"The answer for {sha[:7]} changed while it was judged: judging again ({attempt}/{RECHECKS}).")
+        why = "the answer kept changing while it ran"
+    except Exception as e:  # noqa: BLE001
+        if not wrote:
+            raise                    # no status of this run's is on the commit: the job fails
+        why = f"it could not judge again ({type(e).__name__})"
+        print(f"Could not judge {sha[:7]} again: {e!r}")
+    gh.set_status(sha, "error", _fit(f"Gate could not decide: {why}; re-run the review-gate job"), None, args.context)
+    print(f"Set {args.context}=error on {sha}.")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Set the independent-review commit status on a pull request's head commit.")
     ap.add_argument("--pr", type=int, required=True)
@@ -306,45 +354,28 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="print the decision; set nothing")
     args = ap.parse_args(argv)
     gh = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"])
-    # Judge, write, then judge again. Runs for different pull requests are not serialised, and two pull requests can
-    # share a head commit: a run that judged the commit before a second pull request was opened on it, or before
-    # findings were recorded, could otherwise write its `success` after another run's `failure`. Whichever run writes
-    # last also looks last, and corrects the status if the answer is no longer the one it wrote.
-    #
-    # Once this run has written a status it owns that status. From then on a changed answer is written even if the
-    # pull request has been closed or merged meanwhile (a stale `success` is exactly what triggers an auto-merge),
-    # and a failure to judge again ends in `error`, never in a status this run wrote and could not confirm.
-    wrote = None                     # the head commit this run has written a status on
-    try:
-        for attempt in range(1, RECHECKS + 1):
-            result = evaluate(gh, args.pr)
-            code = report(gh, result, args, force=wrote is not None)
-            if args.dry_run or (wrote is None and not result["open"]):
-                return code
-            wrote = result["head_sha"]
-            if result["state"] == "error":
-                return code
-            check = evaluate(gh, args.pr)
-            if all(check[k] == result[k] for k in ("head_sha", "state", "description")):
-                return code
-            print(f"The answer for {wrote[:7]} changed while it was judged: judging again ({attempt}/{RECHECKS}).")
-        why = "the answer kept changing while it ran"
-    except Exception as e:  # noqa: BLE001
-        if wrote is None:
-            raise                    # nothing written by this run: the job fails, as it would have
-        why = f"it could not judge again ({type(e).__name__})"
-        print(f"Could not judge {wrote[:7]} again: {e!r}")
-    # Never leave a status that may be stale: say the gate could not decide.
-    gh.set_status(wrote, "error", _fit(f"Gate could not decide: {why}; re-run the review-gate job"), None, args.context)
-    print(f"Set {args.context}=error on {wrote}.")
-    return 1
+    # Settle the pull request's head commit. If the pull request has a new head commit by the time that is done,
+    # settle that one as well. The commit it left was settled for whichever pull requests stayed on it.
+    code, settled = 0, []
+    for _ in range(RECHECKS):
+        try:
+            sha = gh.get(f"pulls/{args.pr}")["head"]["sha"]
+        except Exception:  # noqa: BLE001
+            if not settled:
+                raise                # nothing was judged: the job fails
+            print("Could not read the pull request again to see whether it has a new head commit.")
+            return 1
+        if sha in settled:
+            break
+        settled.append(sha)
+        code = max(code, settle(gh, args.pr, sha, args))
+        if args.dry_run:
+            break
+    return code
 
 
-def report(gh, result: dict, args, force: bool = False) -> int:
-    """Prints the decision, writes the job summary and sets the status. Returns the job's exit code.
-
-    No status is set for a pull request that is not open, unless `force`: this run already wrote one and must
-    correct it."""
+def report(gh, result: dict, args) -> int:
+    """Prints the decision, writes the job summary and sets the status. Returns the job's exit code."""
     if result["state"] == "error":
         text = f"## independent-review: error\n\n{result['description']}\n\n`{result['exception']!r}`\n"
     else:
@@ -357,8 +388,6 @@ def report(gh, result: dict, args, force: bool = False) -> int:
             fh.write(text)
     if args.dry_run:
         print("Dry run: no status set.")
-    elif not result["open"] and not force:
-        print("The pull request is not open: no status set.")
     else:
         run_url = None
         if os.environ.get("GITHUB_RUN_ID"):

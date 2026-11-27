@@ -57,7 +57,7 @@ Three rules decide how much care a change needs:
 - **Code:** it touches anything else, outside every risk area. It needs a review.
 - **High:** it touches a risk area. It needs a review, and release gates hold.
 
-A skipped path never raises the level, even inside a risk area: a test beside sensitive code is still a test. The one exception is `factory.yml` itself, which is always high, because it holds the rules that judge every change. The gate reads those rules from the default branch, so a pull request cannot loosen the rules that judge it.
+A skipped path never raises the level, even inside a risk area: a test beside sensitive code is still a test. There are two exceptions, both always high whatever the skip paths say: `factory.yml` itself, because it holds the rules that judge every change, and the file the review station names as its `standard`, because it is what reviewers follow. The gate reads those rules from the default branch, so a pull request cannot loosen the rules that judge it.
 
 ### Path patterns
 
