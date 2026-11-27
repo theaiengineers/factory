@@ -144,6 +144,14 @@ risk:
     def test_a_rename_is_judged_at_both_ends(self):
         self.assertEqual(self.level("docs/notes.md", renamed_from="AGENTS.md")["code"], ["AGENTS.md"])
 
+    def test_a_line_break_in_a_name_does_not_take_it_out_of_a_pattern(self):
+        tier = self.level("docs/runbooks/a\nb.md")
+        self.assertEqual((tier["review"], tier["areas"]), ("high", ["operations"]))
+        self.assertEqual(self.level("docs/runbooks/sub\ndir/x.md")["review"], "high")
+        for pattern, name in (("api/billing/**", "api/billing/evil\n.py"), ("**/AGENTS.md", "a\nb/AGENTS.md"), ("**", "a\nb"), ("a**", "a\r\nb/c")):
+            self.assertEqual(risk.first_match(name, [pattern]), pattern, (pattern, name))
+        self.assertIsNone(risk.first_match("a\n/b", ["*"]))                  # `*` still stays inside one segment
+
     def test_without_the_key_nothing_changes(self):
         without = self.RULES.replace('    never_skip: ["**/AGENTS.md", CLAUDE.md, docs/runbooks/**]\n', "")
         self.assertEqual(config.parse(without)["review"]["never_skip"], [])

@@ -45,7 +45,9 @@ def compile_glob(pattern: str) -> re.Pattern:
         else:
             out.append(re.escape(pattern[i]))
             i += 1
-    return re.compile("".join(out) + r"\Z")
+    # DOTALL: a file's name may hold a line break, and `**` must cross it as `*` and `?` already do. Without it a
+    # name with a line break in it falls out of every `dir/**` pattern, risk areas included.
+    return re.compile("".join(out) + r"\Z", re.DOTALL)
 
 
 def first_match(path: str, patterns: list[str]) -> str | None:
