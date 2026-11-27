@@ -133,7 +133,7 @@ def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | 
     """
     head = head_sha.lower()
     verdict, stale, malformed, early, held = None, None, 0, 0, 0
-    by_person, counted = False, set()
+    unanswered, counted = False, set()        # unanswered: a person's findings that no person has since passed
     for c in sorted(comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)):
         automatic = c.get("author_association") == AUTOMATIC
         if not automatic and c.get("author_association") not in TRUSTED_ASSOCIATIONS:
@@ -153,12 +153,14 @@ def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | 
         elif automatic and marker[1] == PASS and not automatic_passes:
             counted.add(PASS)
             held += 1
-        elif automatic and marker[1] == PASS and verdict == FINDINGS and by_person:
+        elif automatic and marker[1] == PASS and unanswered:
             counted.add(PASS)
         else:
             if automatic:
                 counted.add(marker[1])
-            verdict, by_person = marker[1], not automatic
+            else:
+                unanswered = marker[1] == FINDINGS
+            verdict = marker[1]
     return {"verdict": verdict, "stale": stale, "malformed": malformed, "early": early, "held": held}
 
 

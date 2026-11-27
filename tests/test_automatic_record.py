@@ -65,6 +65,39 @@ class Decide(unittest.TestCase):
         # a person's pass does, and an automatic pass after that changes nothing
         self.assertEqual(review_gate.decide(CODE, HEAD, [person("findings", n=1), auto(n=2), person(n=3)], automatic=CODE_ONLY)[0], "success")
 
+    def test_automatic_findings_in_between_do_not_let_an_automatic_pass_through(self):
+        # A person's findings stay unanswered until a person passes, whatever the automatic reviewer records after.
+        for automatic in (CODE_ONLY, BOTH):
+            for tier in (CODE, HIGH):
+                state, _ = review_gate.decide(tier, HEAD, [person("findings", n=1), auto("findings", n=2), auto(n=3)], automatic=automatic)
+                self.assertEqual(state, "failure")
+        cleared = [person("findings", n=1), auto("findings", n=2), person(n=3)]
+        self.assertEqual(review_gate.decide(CODE, HEAD, cleared, automatic=CODE_ONLY)[0], "success")
+        again = [person("findings", n=1), person(n=2), auto("findings", n=3), auto(n=4)]
+        self.assertEqual(review_gate.decide(CODE, HEAD, again, automatic=CODE_ONLY)[0], "success")
+
+    def test_every_ordering_keeps_the_two_rules(self):
+        # Against a plain restatement of the rules, for every sequence of up to five records.
+        import itertools
+        kinds = [("p", "pass"), ("p", "findings"), ("a", "pass"), ("a", "findings")]
+        for length in range(1, 6):
+            for sequence in itertools.product(kinds, repeat=length):
+                for allowed in (True, False):
+                    verdict, unanswered, seen = None, False, set()
+                    for who, said in sequence:
+                        if who == "p":
+                            verdict, unanswered = said, said == "findings"
+                        elif said in seen:
+                            continue
+                        else:
+                            seen.add(said)
+                            if said == "pass" and (not allowed or unanswered):
+                                continue
+                            verdict = said
+                    records = [(person if who == "p" else auto)(said, n=i + 1) for i, (who, said) in enumerate(sequence)]
+                    got = review_gate.latest_record(records, HEAD, automatic_passes=allowed)["verdict"]
+                    self.assertEqual(got, verdict, (sequence, allowed))
+
     def test_an_automatic_pass_clears_automatic_findings(self):
         self.assertEqual(review_gate.decide(CODE, HEAD, [auto("findings", n=1), auto(n=2)], automatic=CODE_ONLY)[0], "success")
 

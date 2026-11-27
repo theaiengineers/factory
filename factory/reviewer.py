@@ -330,9 +330,13 @@ def parse_answer(text) -> dict:
 
 
 # ── checking and writing the record ────────────────────────────────────────────────────────────────────────────────
-ESCAPED = "\\`*_[]()!|~$"           # Markdown punctuation that acts inside a line: a backslash makes it plain text
-BROKEN = (("@", "@\u200b"), ("#", "#\u200b"), ("://", ":\u200b//"), ("www.", "www\u200b."), ("GH-", "GH\u200b-"))
-LINE_STARTS = re.compile(r"(?:[-+>=]|\d+[.)])")      # what would turn a list item into a rule, a quote or a nested list
+ESCAPED = "\\`*_[]()!|~"            # Markdown punctuation that acts inside a line: a backslash makes it plain text
+# What GitHub links or renders by itself, which no backslash stops. A dollar sign starts maths even when it is
+# escaped or written as a character reference, so it is replaced by the full-width sign, which reads the same.
+BROKEN = (("@", "@\u200b"), ("#", "#\u200b"), ("://", ":\u200b//"), ("www.", "www\u200b."), ("$", "\uff04"))
+ISSUE = re.compile(r"(?i)(gh)-(?=\d)")
+LINE_STARTS = re.compile(r"(?:[-+>=]|\d+[.)]|\\\[)")   # what would start a rule, a quote, a nested list or a task box
+MAX_BODY = 60_000                # characters of a record; GitHub refuses a comment over 65,536
 
 
 def tidy(text, limit: int = TEXT_LIMIT) -> str:
@@ -346,13 +350,16 @@ def clean(text, limit: int = TEXT_LIMIT) -> str:
     """Words made plain text for a comment, at the moment they are written into it: nothing in them renders.
 
     HTML (so also an HTML comment or a character reference) is escaped; Markdown punctuation is escaped, so there
-    is no link, image, emphasis, table, code or maths; and the things GitHub links by itself (a mention, an issue
-    number, a bare address) are broken with an invisible space, as is anything that would start a list or a rule."""
+    is no link, image, emphasis, table or code; the things GitHub links by itself (a mention, an issue number, a
+    bare address) are broken with an invisible space, as is anything that would start a list or a rule; and a
+    dollar sign becomes the full-width one, because nothing else stops GitHub rendering maths. A full commit id
+    still links to that commit."""
     text = tidy(text, limit)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = "".join("\\" + ch if ch in ESCAPED else ch for ch in text)
     for bad, good in BROKEN:
         text = text.replace(bad, good)
+    text = ISSUE.sub("\\1\u200b-", text)
     return ("\u200b" + text) if LINE_STARTS.match(text) else text
 
 
@@ -526,7 +533,10 @@ def record(gh, number: int, result, context: str = review_gate.CONTEXT, run_gate
     if review_gate.latest_record(trusted, result["head_sha"], committed_at, automatic_passes=True)["verdict"]:
         return "A review of this commit was recorded while this one ran: nothing recorded."
     signed = review_gate.proof_line(key, gh.repo, number, result["head_sha"], result["answer"]["verdict"])
-    gh._request("POST", f"issues/{number}/comments", {"body": render(result, signed)})
+    body = render(result, signed)
+    if len(body) > MAX_BODY:
+        raise ReviewerError("The record is too long to post, so nothing was recorded: run the reviewer again, or ask a person")
+    gh._request("POST", f"issues/{number}/comments", {"body": body})
     code = (run_gate or (lambda: review_gate.main(["--pr", str(number), "--context", context])))()
     said = f"Recorded {result['answer']['verdict']} for {result['head_sha'][:7]}"
     if code:

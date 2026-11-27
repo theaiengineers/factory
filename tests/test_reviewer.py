@@ -324,8 +324,11 @@ class Answer(unittest.TestCase):
         self.assertTrue(reviewer.clean("2) nested").startswith("2\\)"))      # an escaped bracket starts no list
         self.assertTrue(reviewer.clean("> quote").startswith("&gt;"))          # an escaped angle starts no quote
         self.assertFalse(reviewer.clean("Read the diff").startswith("\u200b"))
-        self.assertNotIn("$x$", reviewer.clean("maths $x$"))
-        self.assertNotIn("GH-12", reviewer.clean("see GH-12"))
+        self.assertNotIn("$", reviewer.clean("maths $x^2$ and $$y$$ and \\$z\\$"))
+        for ref in ("GH-12", "gh-12", "Gh-3"):
+            self.assertNotIn(ref, reviewer.clean("see " + ref))
+        self.assertEqual(reviewer.clean("high-level gh-pages"), "high-level gh-pages")
+        self.assertTrue(reviewer.clean("[ ] task").startswith("\u200b"))
 
     def test_lists_are_bounded(self):
         out = reviewer.check_answer({**ANSWER, "checked": ["c"] * 100, "remarks": ["r"] * 100})
@@ -528,6 +531,16 @@ class Record(unittest.TestCase):
         said = reviewer.record(gh, 7, skip)
         self.assertEqual(len(gh.posted), 1)
         self.assertIn("already", said)
+
+    def test_a_record_too_long_to_post_is_not_posted(self):
+        dense = "&<>" * 200
+        answer = {**ANSWER, "checked": [dense] * 12, "remarks": [dense] * 12, "verdict": "findings",
+                  "blocking": [{"file": "a.py", "line": 1, "what": dense}] * 20}
+        gh = FakeGitHub()
+        with self.assertRaises(reviewer.ReviewerError) as caught:
+            reviewer.record(gh, 7, self.result(answer=answer), run_gate=lambda: self.fail("gate ran"), key=KEY)
+        self.assertIn("too long", str(caught.exception))
+        self.assertEqual(gh.posted, [])
 
     def test_a_notice_needs_no_key(self):
         gh = FakeGitHub()
