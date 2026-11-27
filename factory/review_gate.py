@@ -47,10 +47,14 @@ PASS = "pass"
 FINDINGS = "findings"
 MAX_FILES = 3000                 # GitHub lists at most this many files of a pull request
 DESCRIPTION_LIMIT = 140          # GitHub's limit on a status description
-# Only a record from someone who may write to the repository counts. The comment's `author_association` says so for
-# most accounts, but a workflow token is shown a member whose organisation membership is private as a mere
-# CONTRIBUTOR, so for any other association the commenter's permission is looked up.
-TRUSTED_ASSOCIATIONS = ("OWNER", "MEMBER", "COLLABORATOR")
+# Only a record from someone who may write to the repository counts. The comment's `author_association` does not
+# say so: MEMBER is anyone in the organisation, including a member who can only read this repository, and a member
+# whose membership is private is shown to a workflow token as a mere CONTRIBUTOR. So `trust_writers` looks up the
+# permission of every account that posts a marker and rewrites the association to what that lookup found. Only an
+# OWNER is taken at its word. `latest_record` then counts the associations below.
+TRUSTED_ASSOCIATIONS = ("OWNER", "COLLABORATOR")
+UNTRUSTED = "NONE"
+RECHECKS = 3                     # times the status is recomputed when the pull requests sharing the commit change
 WRITE_PERMISSIONS = ("admin", "maintain", "write")
 ATTEMPTS = 3                     # per API call, for a network fault or a 5xx / rate-limit answer
 RETRY_SECONDS = 2
@@ -78,7 +82,9 @@ def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | 
     Returns {"verdict": "pass" | "findings" | None, "stale": sha of the newest record for another commit or None,
     "malformed": n, "early": n}. The newest record for the head commit wins, so findings posted after a pass block
     again and a pass posted after findings clears them. A record whose comment was created before the head commit was
-    made (`head_committed_at`, ISO 8601 UTC) cannot be a review of it and is not counted. Records from accounts that are not an owner, member or collaborator are ignored (`trust_writers` first vouches for accounts with write access).
+    made (`head_committed_at`, ISO 8601 UTC) cannot be a review of it and is not counted. Only records whose
+    association is in TRUSTED_ASSOCIATIONS count; pass the comments through `trust_writers` first, which sets it from
+    the account's real permission.
     """
     head = head_sha.lower()
     verdict, stale, malformed, early = None, None, 0, 0
@@ -213,21 +219,21 @@ def load_config(gh, default_branch: str) -> dict:
 
 
 def trust_writers(gh, comments: list[dict]) -> list[dict]:
-    """Comments that carry (or attempt) a review marker from an account the association does not vouch for: ask the API
-    whether that account may write to the repository, once per account, and mark the comment a collaborator's if so.
-    A lookup that fails leaves the comment untrusted: the gate then asks for a review, it never passes by accident."""
+    """Sets the association of every comment that carries (or attempts) a review marker from what the account may
+    actually do: COLLABORATOR when it can write to the repository, otherwise untrusted. The permission is asked for
+    once per account. An OWNER is not looked up. A lookup that fails leaves the comment untrusted: the gate then asks
+    for a review, it never passes by accident."""
     cache: dict[str, bool] = {}
     out = []
     for c in comments:
-        if c.get("author_association") not in TRUSTED_ASSOCIATIONS and (parse_marker(c.get("body")) or is_malformed_marker(c.get("body"))):
+        if c.get("author_association") != "OWNER" and (parse_marker(c.get("body")) or is_malformed_marker(c.get("body"))):
             login = ((c.get("user") or {}).get("login") or "").strip()
             if login and login not in cache:
                 try:
                     cache[login] = (gh.get(f"collaborators/{login}/permission") or {}).get("permission") in WRITE_PERMISSIONS
                 except Exception:  # noqa: BLE001
                     cache[login] = False
-            if cache.get(login):
-                c = {**c, "author_association": "COLLABORATOR"}
+            c = {**c, "author_association": "COLLABORATOR" if cache.get(login) else UNTRUSTED}
         out.append(c)
     return out
 
@@ -256,16 +262,32 @@ def evaluate_one(gh: GitHub, pr: dict, cfg: dict) -> dict:
     return {**base, "tier": tier, "state": state, "description": description, "standard": standard}
 
 
+def sharing(gh, head_sha: str) -> list[dict]:
+    """The open pull requests whose head commit is `head_sha`."""
+    return [p for p in gh.pages(f"commits/{head_sha}/pulls", 1000) if p.get("state") == "open" and p["head"]["sha"] == head_sha]
+
+
+def settled(gh, result: dict) -> bool:
+    """True when the open pull requests sharing the head commit are still the ones that were judged.
+
+    Two pull requests can share a head commit, and each has its own run. A run that judged the commit before the
+    second pull request existed could otherwise write its `success` after the other run's `failure`. So the set is
+    read again AFTER the status is written: whichever run writes last sees the full set and corrects the status."""
+    if result.get("judged") is None:
+        return True                      # nothing was judged (an error): there is nothing to compare
+    return sorted(p["number"] for p in sharing(gh, result["head_sha"])) == result["judged"]
+
+
 def evaluate(gh: GitHub, number: int) -> dict:
     """The status for the head commit of pull request `number`: the worst decision among the open pull requests that
     share that head commit. Returns {"open", "head_sha", "state", "description", "results": [one per pull request]}.
     Any failure after the head commit is known becomes the state `error`, so the commit never keeps an earlier success."""
     pr = gh.get(f"pulls/{number}")
     head_sha = pr["head"]["sha"]
-    result = {"pr": number, "open": pr.get("state") == "open", "head_sha": head_sha, "results": []}
+    result = {"pr": number, "open": pr.get("state") == "open", "head_sha": head_sha, "results": [], "judged": None}
     try:
-        siblings = [p for p in gh.pages(f"commits/{head_sha}/pulls", 1000)
-                    if p.get("state") == "open" and p["head"]["sha"] == head_sha and p["number"] != number]
+        siblings = [p for p in sharing(gh, head_sha) if p["number"] != number]
+        result["judged"] = sorted({number} | {p["number"] for p in siblings})
         cfg = load_config(gh, pr["base"]["repo"]["default_branch"])
         result["results"] = [evaluate_one(gh, p, cfg) for p in [pr] + siblings]
     except config.ConfigError as e:
@@ -290,7 +312,27 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true", help="print the decision; set nothing")
     args = ap.parse_args(argv)
     gh = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"])
-    result = evaluate(gh, args.pr)
+    for attempt in range(1, RECHECKS + 1):
+        result = evaluate(gh, args.pr)
+        code = report(gh, result, args)
+        if args.dry_run or not result["open"] or result["state"] == "error":
+            return code
+        try:
+            if settled(gh, result):
+                return code
+        except Exception as e:  # noqa: BLE001
+            print(f"Could not confirm which pull requests share the commit ({type(e).__name__}).")
+            break
+        print(f"The pull requests sharing {result['head_sha'][:7]} changed while it was judged: judging again ({attempt}/{RECHECKS}).")
+    # Never leave a status that may be stale: say the gate could not decide.
+    description = _fit("Gate could not decide which pull requests share this commit: re-run the review-gate job")
+    gh.set_status(result["head_sha"], "error", description, None, args.context)
+    print(f"Set {args.context}=error on {result['head_sha']}.")
+    return 1
+
+
+def report(gh, result: dict, args) -> int:
+    """Prints the decision, writes the job summary and sets the status. Returns the job's exit code."""
     if result["state"] == "error":
         text = f"## independent-review: error\n\n{result['description']}\n\n`{result['exception']!r}`\n"
     else:

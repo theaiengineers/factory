@@ -152,5 +152,6 @@ extensions:
 ## Open questions
 
 - **Rules that paths cannot express.** For example, a very large file where risk depends on which function changed. This needs a small rule language or a way to call a script.
+- **A reviewer who is not the author.** The gate checks that the account recording a review can write to the repository. It does not yet check that it is a different account from the author, because agents often share one login. An option to require that belongs on the review station.
 - **Ordering between lines.** A change that feeds two lines may need one released before the other.
 - **Several buildings.** Settings shared by a whole factory, such as `people`, should not have to be repeated in every repository.

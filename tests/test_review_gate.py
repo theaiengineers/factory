@@ -32,7 +32,13 @@ def marker(sha: str = HEAD, verdict: str = "pass") -> str:
 
 
 def comment(body: str, n: int = 1, association: str = "MEMBER") -> dict:
+    association = "COLLABORATOR" if association == "MEMBER" else association      # what trust_writers leaves for a writer
     return {"id": n, "created_at": f"2026-01-15T10:{n:02d}:00Z", "body": body, "author_association": association}
+
+
+def posted(body: str, n: int = 1, association: str = "MEMBER", login: str = "reviewer") -> dict:
+    """A comment as GitHub returns it, before the gate has looked up what its author may do."""
+    return {"id": n, "created_at": f"2026-01-15T10:{n:02d}:00Z", "body": body, "author_association": association, "user": {"login": login}}
 
 
 class Marker(unittest.TestCase):
@@ -109,7 +115,10 @@ class Decision(unittest.TestCase):
     def test_records_from_accounts_without_write_access_are_ignored(self):
         for association in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", None):
             self.assertEqual(review_gate.decide(HIGH, HEAD, [comment(marker(), association=association)])[0], "failure")
-        for association in ("OWNER", "MEMBER", "COLLABORATOR"):
+        # MEMBER is anyone in the organisation: it does not count until trust_writers has checked the account.
+        raw_member = {**comment(marker()), "author_association": "MEMBER"}
+        self.assertEqual(review_gate.decide(HIGH, HEAD, [raw_member])[0], "failure")
+        for association in ("OWNER", "COLLABORATOR"):
             self.assertEqual(review_gate.decide(HIGH, HEAD, [comment(marker(), association=association)])[0], "success")
 
     def test_a_malformed_marker_fails_and_points_at_the_standard(self):
@@ -134,6 +143,7 @@ class FakeGitHub:
 
     def __init__(self, prs, state="open", fail_on=None):
         self.prs, self.state, self.fail_on, self.statuses, self.comment_reads, self.file_reads = prs, state, fail_on, [], 0, []
+        self.permissions, self.permission_reads, self.sibling_reads, self.arrives = {"reviewer": "write"}, [], 0, {}
 
     def _pr(self, number):
         return {"number": number, "state": self.state, "head": {"sha": HEAD},
@@ -147,8 +157,8 @@ class FakeGitHub:
         if path.startswith("collaborators/"):
             self._maybe_fail("permission")
             login = path.split("/")[1]
-            self.permission_reads = getattr(self, "permission_reads", []) + [login]
-            return {"permission": getattr(self, "permissions", {}).get(login, "read")}
+            self.permission_reads.append(login)
+            return {"permission": self.permissions.get(login, "read")}
         if path.startswith("commits/"):
             self._maybe_fail("commit")
             return {"commit": {"committer": {"date": self.committed_at}}}
@@ -157,6 +167,10 @@ class FakeGitHub:
     def pages(self, path, limit):
         if path.startswith("commits/"):
             self._maybe_fail("siblings")
+            self.sibling_reads += 1
+            for number, (after, pr) in list(self.arrives.items()):      # a pull request opened while the gate runs
+                if self.sibling_reads > after:
+                    self.prs[number] = pr
             return [self._pr(n) for n in self.prs]
         number = int(path.split("/")[1])
         if path.endswith("/files"):
@@ -197,7 +211,7 @@ class Evaluate(unittest.TestCase):
 
     def test_a_high_risk_pull_request_follows_the_record(self):
         self.assertEqual(review_gate.evaluate(one(BILLING), 7)["state"], "failure")
-        self.assertEqual(review_gate.evaluate(one(BILLING, [comment(marker())]), 7)["state"], "success")
+        self.assertEqual(review_gate.evaluate(one(BILLING, [posted(marker())]), 7)["state"], "success")
 
     def test_a_pull_request_that_changes_the_factory_file_is_high_risk(self):
         result = review_gate.evaluate(one([{"filename": "factory.yml", "status": "modified"}]), 7)
@@ -205,21 +219,36 @@ class Evaluate(unittest.TestCase):
         self.assertIn("factory rules", result["description"])
 
     def test_the_head_commits_time_is_read_and_an_earlier_record_is_refused(self):
-        gh = one(BILLING, [comment(marker())])
+        gh = one(BILLING, [posted(marker())])
         gh.committed_at = "2026-01-15T11:00:00Z"
         self.assertIn("older than commit", review_gate.evaluate(gh, 7)["description"])
 
-    def test_a_writer_the_token_sees_as_a_contributor_is_trusted_and_a_reader_is_not(self):
-        def record(login):
-            return {**comment(marker(), association="CONTRIBUTOR"), "user": {"login": login}}
-        gh = one(BILLING, [record("writer"), record("writer")])
-        gh.permissions = {"writer": "write"}
-        self.assertEqual(review_gate.evaluate(gh, 7)["state"], "success")
-        self.assertEqual(gh.permission_reads, ["writer"])
-        self.assertEqual(review_gate.evaluate(one(BILLING, [record("reader")]), 7)["state"], "failure")
-        gh = one(BILLING, [record("writer")], fail_on="permission")
-        gh.permissions = {"writer": "admin"}
+    def test_only_an_account_that_can_write_to_the_repository_is_trusted_whatever_its_association(self):
+        for association in ("MEMBER", "CONTRIBUTOR", "COLLABORATOR", "NONE"):
+            with self.subTest(association=association):
+                gh = one(BILLING, [posted(marker(), 1, association, "writer"), posted(marker(), 2, association, "writer")])
+                gh.permissions = {"writer": "write"}
+                self.assertEqual(review_gate.evaluate(gh, 7)["state"], "success")
+                self.assertEqual(gh.permission_reads, ["writer"])                 # looked up once per account
+                # The same association from an account that can only read: an organisation member, say.
+                self.assertEqual(review_gate.evaluate(one(BILLING, [posted(marker(), 1, association, "reader")]), 7)["state"], "failure")
+
+    def test_an_owner_is_trusted_without_a_lookup_and_a_failed_lookup_never_vouches(self):
+        gh = one(BILLING, [posted(marker(), 1, "OWNER", "owner")])
+        self.assertEqual((review_gate.evaluate(gh, 7)["state"], gh.permission_reads), ("success", []))
+        gh = one(BILLING, [posted(marker())], fail_on="permission")
         self.assertEqual(review_gate.evaluate(gh, 7)["state"], "failure")
+        gh = one(BILLING, [{**posted(marker()), "user": None}])                   # a deleted account
+        self.assertEqual(review_gate.evaluate(gh, 7)["state"], "failure")
+
+    def test_only_comments_that_carry_a_marker_are_looked_up(self):
+        gh = one(BILLING, [posted("just a remark", 1, "NONE", "anyone")])
+        review_gate.evaluate(gh, 7)
+        self.assertEqual(gh.permission_reads, [])
+
+    def test_findings_from_an_account_that_cannot_write_do_not_block_a_trusted_pass(self):
+        gh = one(BILLING, [posted(marker(), 1), posted(marker(verdict="findings"), 2, "MEMBER", "reader")])
+        self.assertEqual(review_gate.evaluate(gh, 7)["state"], "success")
 
     def test_the_worst_result_among_pull_requests_sharing_the_head_commit_is_the_one_set(self):
         gh = FakeGitHub({7: ("side", DOCS, []), 8: ("main", BILLING, [])})
@@ -230,10 +259,10 @@ class Evaluate(unittest.TestCase):
     def test_any_failure_to_read_is_an_error_never_a_pass(self):
         for what in ("siblings", "files", "comments", "commit"):
             with self.subTest(what=what):
-                self.assertEqual(review_gate.evaluate(one(BILLING, [comment(marker())], fail_on=what), 7)["state"], "error")
+                self.assertEqual(review_gate.evaluate(one(BILLING, [posted(marker())], fail_on=what), 7)["state"], "error")
 
     def test_a_missing_or_unusable_factory_file_is_an_error_that_says_so(self):
-        gh = one(BILLING, [comment(marker())])
+        gh = one(BILLING, [posted(marker())])
         gh.factory = None
         result = review_gate.evaluate(gh, 7)
         self.assertEqual((result["state"], result["description"]), ("error", "Gate could not decide: No factory.yml on the default branch"))
@@ -263,9 +292,43 @@ class Main(unittest.TestCase):
         return code, out.getvalue()
 
     def test_sets_the_status_under_the_default_name(self):
-        gh = one(BILLING, [comment(marker())])
+        gh = one(BILLING, [posted(marker())])
         code, _ = self.run_main(gh)
         self.assertEqual((code, [(s[1], s[3]) for s in gh.statuses]), (0, [("success", "independent-review")]))
+
+    def test_a_pull_request_that_appears_on_the_same_commit_while_the_gate_runs_is_judged_before_the_run_ends(self):
+        # #7 changes only prose. #8, into main with the same head commit and a billing change, is opened after #7's
+        # run has listed the pull requests sharing the commit. Without the check after the write, #7's run would
+        # leave `success` on a commit that #8 needs reviewed.
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {8: (1, ("main", BILLING, []))}
+        code, out = self.run_main(gh)
+        self.assertEqual([s[1] for s in gh.statuses], ["success", "failure"])
+        self.assertEqual(code, 0)
+        self.assertIn("judging again", out)
+
+    def test_a_commit_whose_pull_requests_never_settle_ends_as_an_error_not_a_stale_pass(self):
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {n: (n - 7, ("side", DOCS, [])) for n in range(8, 20)}       # another one every time it looks
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, gh.statuses[-1][1]), (1, "error"))
+
+    def test_failing_to_read_the_set_after_the_write_ends_as_an_error(self):
+        gh = one(BILLING, [posted(marker())])
+        real = gh.pages
+
+        def pages(path, limit):
+            if path.startswith("commits/") and gh.sibling_reads >= 1:
+                raise OSError("HTTP 502")
+            return real(path, limit)
+        gh.pages = pages
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (1, ["success", "error"]))
+
+    def test_the_set_is_read_again_only_after_the_status_is_written(self):
+        gh = one(BILLING, [posted(marker())])
+        self.run_main(gh)
+        self.assertEqual((gh.sibling_reads, len(gh.statuses)), (2, 1))
 
     def test_a_shadow_run_sets_a_differently_named_status(self):
         gh = one(BILLING)
