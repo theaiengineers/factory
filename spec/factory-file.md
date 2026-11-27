@@ -37,7 +37,7 @@ intake:
 | `require` | For `checks`: the check names that must pass |
 | `standard` | For `independent-review`: the document reviewers follow |
 | `skip_when_only` | The station is skipped when a change touches nothing outside these paths |
-| `automatic` | For `independent-review`: the automatic reviewer whose records count. `account` is the bot login it posts from, such as `github-actions[bot]`; a person's login is refused. `passes` lists the levels its pass counts for: `[code]` (the default) or `[code, high]`. Its findings always count. A record from that account counts only when it is signed with the repository's reviewer key. See [the automatic reviewer](../docs/AUTOMATIC_REVIEWER.md) |
+| `automatic` | For `independent-review`: the automatic reviewer whose records count. `account` is the bot login it posts from, such as `github-actions[bot]`; a person's login is refused. `passes` lists the levels its pass counts for: `[code]` (the default) or `[code, high]`. Its findings always count. A record from that account counts only when it is signed with the repository's reviewer key. `credential_renewed` (optional, a day written `YYYY-MM-DD`) is when the model credential was last created; the reviewer health check uses it to warn that renewal is due, and the gate ignores it. See [the automatic reviewer](../docs/AUTOMATIC_REVIEWER.md) |
 
 ## `risk`: what needs extra care
 

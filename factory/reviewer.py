@@ -50,6 +50,7 @@ TEXT_LIMIT = 600                 # characters kept of each thing the model says
 LIST_LIMITS = {"checked": 12, "blocking": 20, "remarks": 12, "addressed_to_reviewer": 5}
 CREDENTIALS = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")     # in the order the Claude Code CLI prefers them
 PASSED_CONCLUSIONS = ("success", "neutral", "skipped")
+REFUSED_STATUSES = (401, 403)    # the provider's answer when it will not accept the credential itself
 
 # Why no review was made. The words are fixed here so nothing a pull request says reaches a notice.
 NOTICES = {
@@ -62,12 +63,20 @@ NOTICES = {
                       "commit. Run the reviewer again when they have passed.",
     "model-failed": "The automatic reviewer could not complete a review (the model call failed or its answer could "
                     "not be used). Run the reviewer again, or ask a person.",
+    "credential-refused": "The automatic reviewer's model credential was refused: it has expired, been withdrawn, or "
+                          "the subscription or account behind it can no longer be used. Someone who administers "
+                          "this repository needs to replace the secret. Until then this change needs a person's "
+                          "review; running the reviewer again will not help.",
 }
 QUIET = "quiet"                  # skipped with nothing to tell the pull request
 
 
 class ReviewerError(RuntimeError):
     """The model could not be asked, or its answer cannot be used. The message is safe to print."""
+
+
+class CredentialRefused(ReviewerError):
+    """The provider would not accept the credential. Asking again cannot help until a person replaces it."""
 
 
 # ── deciding whether to review ─────────────────────────────────────────────────────────────────────────────────────
@@ -280,24 +289,26 @@ def credential(environ) -> tuple[str, str]:
 ASK = "Review the change given on standard input, as your instructions say."
 
 
-def claude_command(binary: str, model: str | None) -> list[str]:
+def claude_command(binary: str, model: str | None, system: str | None = None, ask: str = ASK) -> list[str]:
     """One model call with no tools, no project settings and no saved session."""
     command = [binary, "--print", "--output-format", "json", "--tools", "", "--disallowedTools", "mcp__*",
                "--strict-mcp-config", "--setting-sources", "project,local", "--no-session-persistence",
-               "--max-turns", "1", "--system-prompt", SYSTEM]
-    return command + (["--model", model] if model else []) + [ASK]
+               "--max-turns", "1", "--system-prompt", SYSTEM if system is None else system]
+    return command + (["--model", model] if model else []) + [ask]
 
 
-def ask_claude(prompt: str, environ, model: str | None = None, binary: str = "claude", run=subprocess.run) -> dict:
-    """The model's answer as the object it was asked for. Raises ReviewerError with a safe message otherwise."""
+def call_claude(prompt: str, environ, model: str | None = None, binary: str = "claude", run=subprocess.run,
+                system: str | None = None, ask: str = ASK, seconds: int = MODEL_SECONDS):
+    """One model call; returns the reply's text. Raises CredentialRefused when the provider would not accept the
+    credential, and ReviewerError with a safe message for any other failure."""
     name, value = credential(environ)
     with tempfile.TemporaryDirectory() as empty:
         env = {"PATH": environ.get("PATH", ""), "HOME": empty, "LANG": "C.UTF-8", name: value,
                "DISABLE_UPDATES": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1",
                "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1"}
         try:
-            done = run(claude_command(binary, model), input=prompt, capture_output=True, text=True, cwd=empty, env=env,
-                       timeout=MODEL_SECONDS)
+            done = run(claude_command(binary, model, system, ask), input=prompt, capture_output=True, text=True,
+                       cwd=empty, env=env, timeout=seconds)
         except FileNotFoundError as e:
             raise ReviewerError("The claude program is not installed") from e
         except subprocess.TimeoutExpired as e:
@@ -308,10 +319,20 @@ def ask_claude(prompt: str, environ, model: str | None = None, binary: str = "cl
         raise ReviewerError(f"The claude program did not return JSON (exit code {done.returncode})") from e
     if not isinstance(envelope, dict) or envelope.get("is_error") or done.returncode != 0:
         kind = envelope.get("subtype") if isinstance(envelope, dict) else None
-        raise ReviewerError(f"The model call failed (exit code {done.returncode}, {kind or 'no reason given'})")
+        status = envelope.get("api_error_status") if isinstance(envelope, dict) else None
+        status = status if isinstance(status, int) and not isinstance(status, bool) else None
+        if status in REFUSED_STATUSES:
+            raise CredentialRefused(f"The model's provider refused the credential (status {status})")
+        raise ReviewerError(f"The model call failed (exit code {done.returncode}, {kind or 'no reason given'}"
+                            + (f", status {status})" if status else ")"))
     if isinstance(envelope.get("result"), str) and leaks(envelope["result"], environ):
         raise ReviewerError("The model's answer carried a credential and was thrown away")
-    return parse_answer(envelope.get("result"))
+    return envelope.get("result")
+
+
+def ask_claude(prompt: str, environ, model: str | None = None, binary: str = "claude", run=subprocess.run) -> dict:
+    """The model's answer as the object it was asked for. Raises ReviewerError with a safe message otherwise."""
+    return parse_answer(call_claude(prompt, environ, model, binary, run))
 
 
 def parse_answer(text) -> dict:
@@ -492,6 +513,8 @@ def review(gh, number: int, environ, force: bool = False, wait_minutes: float = 
     prompt = build_prompt(standard, tier, pr.get("title") or "", pr.get("body") or "", change["text"])
     try:
         answer = ask(prompt, environ, model)
+    except CredentialRefused as e:
+        return {**out, "notice": "credential-refused", "why": str(e), "warn": True}
     except ReviewerError as e:
         return {**out, "notice": "model-failed", "why": str(e)}
     result = {"action": "review", "pr": number, "head_sha": decided["head_sha"], "level": tier["review"], "areas": tier["areas"],

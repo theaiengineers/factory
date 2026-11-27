@@ -102,17 +102,54 @@ Copy `starter/factory-reviewer.yml` to `.github/workflows/factory-reviewer.yml` 
 
 Like the gate, it starts working once it is on the default branch.
 
+### 5. Add the health check
+
+Copy `starter/factory-reviewer-health.yml` to `.github/workflows/factory-reviewer-health.yml`, pinned to the same commit id. It needs v0.4.0 or later, and issues switched on for the repository. Once a month it checks that the reviewer can still reach its model and opens an issue when it cannot. See [when the credential stops working](#when-the-credential-stops-working).
+
 ### Then see it work
 
 Open a pull request with a small real code change. After its required checks pass, a comment headed "Automatic review" should appear and the `independent-review` status should turn. Then try a change inside a risk area: with `passes: [code]` the status should say the automatic review passed and a person's review is still needed.
 
-If nothing appears, read the reviewer workflow's run. Its log says in one line why it did not review. A missing model credential shows as a warning on the run; a missing reviewer key fails the record job. If the status turns and later turns back, the gate workflow has not been given the key: the reviewer's own run of the gate has it, and the gate workflow's next run does not.
+If nothing appears, read the reviewer workflow's run. Its log says in one line why it did not review. A missing model credential shows as a warning on the run; a refused one gets a notice on the pull request; a missing reviewer key fails the record job. If the status turns and later turns back, the gate workflow has not been given the key: the reviewer's own run of the gate has it, and the gate workflow's next run does not.
 
 ## What it costs
 
 One model call for each commit that needs a review and whose checks pass. Pushing three commits to a pull request means up to three reviews; a newer commit cancels a review of an older one that is still running. Drafts are not reviewed, so keep work in draft until it is ready.
 
 Outside contributors cannot spend your credential: a pull request from an account that cannot write to the repository is not reviewed until a maintainer starts it by hand (the workflow's "Run workflow" button, with the pull request number and `force`).
+
+## When the credential stops working
+
+A subscription token lasts a year. A key can be withdrawn, and a subscription can end. Whichever happens, nothing merges unreviewed: with no review recorded, the gate holds each change until a person reviews it.
+
+**On a pull request.** When the model's provider refuses the credential, the reviewer says so in those words on the pull request, once for each commit: the credential was refused, someone who administers the repository needs to replace the secret, and running the reviewer again will not help. Any other failure to get an answer gets the general "could not complete a review" notice. The reviewer's run also carries a warning.
+
+**Between pull requests.** The health check (step 5 above) runs on a schedule, so a quiet repository finds out too. It makes one very small model call that carries nothing from the repository, and then:
+
+| It finds | It does |
+|---|---|
+| The model answers | Nothing. If an issue it opened earlier is still open, it closes it with a comment |
+| The credential is refused | Opens an issue, and the run fails |
+| No credential is set, though the factory file names an automatic reviewer | Opens an issue, and the run fails |
+| No answer after two tries, and the credential was not refused | Opens an issue saying so, and the run fails. This may be a passing fault |
+
+It opens one issue for each kind of problem and does not open another while that one is open. Only an issue opened by the workflow account counts as "already open", so nobody else can silence a warning. Every word of an issue is fixed in the code. A failed scheduled run is also emailed by GitHub to whoever last changed the schedule.
+
+This tells you the credential has stopped, within one schedule interval. It cannot tell you in advance: a token does not say when it expires, and a workflow cannot read a secret's age.
+
+**A countdown, if you want one.** Write the day the credential was last created into the factory file:
+
+```yaml
+    automatic:
+      account: github-actions[bot]
+      credential_renewed: 2026-11-27
+```
+
+Once that day is 330 days old, the health check opens an issue saying renewal is due, about five weeks before a one-year token expires. The run does not fail for this, and the reviewer keeps working until the token really expires. The day is only as good as the person who writes it down: change it each time you replace the credential, and the issue closes at the next check. Move the gate to v0.4.0 or later before adding this line, because an earlier gate refuses a key it does not know.
+
+**Replacing the credential.** Whoever owns it creates a new one (`claude setup-token`, or a new key in the Claude Console) and sets the secret again with `gh secret set NAME`. Then start the health check by hand from the Actions tab: it should pass and close its issue. Pull requests that got the refused notice are not reviewed again by themselves; start the reviewer by hand for each, or push a new commit.
+
+What the health check does not watch: the reviewer key (a missing one fails the reviewer's record job, visibly), and whether GitHub has paused the schedule. GitHub stops scheduled workflows in a public repository after 60 days without activity and emails about it.
 
 ## Starting one by hand
 

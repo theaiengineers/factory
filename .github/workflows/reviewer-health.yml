@@ -1,0 +1,116 @@
+name: reviewer-health
+
+# Checks that the automatic reviewer can still reach its model (factory/reviewer_health.py), and opens an issue when
+# it cannot or when the credential is due for renewal. See docs/AUTOMATIC_REVIEWER.md, "When the credential stops
+# working".
+#
+# Call it on a schedule from a workflow in your own repository (starter/factory-reviewer-health.yml is one to copy):
+#
+#   on:
+#     schedule:
+#       - cron: "23 7 1 * *"
+#     workflow_dispatch:
+#   permissions: {}
+#   jobs:
+#     health:
+#       permissions:
+#         contents: read
+#         issues: write
+#       uses: theaiengineers/factory/.github/workflows/reviewer-health.yml@<commit>
+#       with:
+#         factory_ref: <the same commit>
+#       secrets:
+#         claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}     # or anthropic_api_key
+#
+# It does nothing unless the factory file on the default branch names an automatic reviewer.
+#
+# SAFETY. Two jobs with different powers, as in reviewer.yml.
+#   check    holds the model's credential and can only read. Its one model call carries a fixed sentence and nothing
+#            from the repository.
+#   report   can open, comment on and close issues, and never holds the model's credential. Every word it writes is
+#            fixed in the code.
+# Neither checks out the calling repository.
+#
+# PINNING. As for reviewer.yml: pin `uses:` and `factory_ref` to the same full commit id.
+
+on:
+  workflow_call:
+    inputs:
+      factory_ref:
+        description: The version of the factory to run. Use the same commit id as in `uses:`.
+        type: string
+        required: true
+      model:
+        description: The model to ask, as a full model id. Empty uses the program's default.
+        type: string
+        default: ""
+    secrets:
+      claude_code_oauth_token:
+        description: A Claude subscription token from `claude setup-token`.
+        required: false
+      anthropic_api_key:
+        description: An Anthropic API key. Used in preference to the subscription token when both are given.
+        required: false
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.check.outputs.result }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+        with:
+          repository: theaiengineers/factory
+          ref: ${{ inputs.factory_ref }}
+          persist-credentials: false
+      - name: Install PyYAML, by hash, as a prebuilt wheel only
+        run: |
+          python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
+      - name: Install the model's program, by hash, without running install scripts
+        working-directory: reviewer-runtime
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node node_modules/@anthropic-ai/claude-code/install.cjs
+          ./node_modules/.bin/claude --version
+      - name: Check
+        id: check
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.anthropic_api_key }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.claude_code_oauth_token }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          export PATH="$PWD/reviewer-runtime/node_modules/.bin:$PATH"
+          python3 -m factory.reviewer_health check --out "$RUNNER_TEMP/health.json" --model "$MODEL"
+          echo "result=$(cat "$RUNNER_TEMP/health.json")" >> "$GITHUB_OUTPUT"
+
+  report:
+    needs: check
+    # Runs even when the check job failed: no result is itself reported as a failure to reach the model.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
+        with:
+          repository: theaiengineers/factory
+          ref: ${{ inputs.factory_ref }}
+          persist-credentials: false
+      - name: Install PyYAML, by hash, as a prebuilt wheel only
+        run: |
+          python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
+      - name: Open or close an issue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RESULT: ${{ needs.check.outputs.result }}
+        run: |
+          printf '%s' "$RESULT" > "$RUNNER_TEMP/health.json"
+          python3 -m factory.reviewer_health report --result "$RUNNER_TEMP/health.json"
