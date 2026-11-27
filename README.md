@@ -12,6 +12,13 @@ The independent-review gate. It reads the risk rules from your `factory.yml`, wo
 
 This repository runs on itself: its own [factory.yml](factory.yml) and gate judge its pull requests.
 
+## Setting it up
+
+Most people will set this up with an agent. Two guides are written for that, and a person can follow them too:
+
+1. [Readiness check](docs/READINESS.md): what a repository needs before a factory can run on it, most of which is the project's own (its tests above all). It reads, changes nothing, and ends in a report saying which stage the repository can reach today.
+2. [Setup guide](docs/SETUP.md): stage 1, step by step, with the three decisions that belong to the owner marked. Starter files are in [starter/](starter/), and `python3 -m factory.preview` shows what a set of rules would have said about changes that have already merged.
+
 To run the tests: `python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt`, then `python3 -m unittest discover -s tests`.
 
 ## The idea in one picture

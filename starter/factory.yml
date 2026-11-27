@@ -1,0 +1,40 @@
+# Starter factory file for stage 1: tests, then an independent review.
+# Copy it to the root of your repository as `factory.yml` and replace every value marked CHANGE.
+# What each key means: https://github.com/theaiengineers/factory/blob/main/spec/factory-file.md
+# How to fill it in:   https://github.com/theaiengineers/factory/blob/main/docs/SETUP.md
+
+spec: factory/0.1
+factory: CHANGE-your-organisation
+building: CHANGE-your-organisation/your-repository
+branch: main            # CHANGE if your releasing branch has another name
+
+intake:
+  # The checks that must pass before a change can merge. Use the exact names GitHub shows on a pull request.
+  # The gate does not enforce this list yet: make the same names required in your branch settings (SETUP.md, step 8).
+  - station: testing
+    uses: checks
+    require: [CHANGE-name-of-your-test-check]
+
+  # The independent review. A change that touches only these paths needs no review.
+  # Start narrow. Every path you add here is a path nobody has to look at.
+  - station: qa
+    uses: independent-review
+    standard: docs/REVIEW_STANDARD.md
+    skip_when_only: ["**/*.md"]
+
+# What needs extra care, and why. The `why` is shown to the reviewer, so write it for them:
+# say what goes wrong for a real person if this code is wrong.
+# Replace these examples with your own areas. Delete any that you do not have.
+risk:
+  - area: sign-in
+    why: CHANGE decides who is let in; a mistake lets the wrong person into an account
+    paths: [CHANGE/auth/**]
+  - area: payments
+    why: CHANGE moves money; a mistake charges real customers
+    paths: [CHANGE/billing/**]
+  - area: stored data
+    why: CHANGE changes or deletes what customers have stored; a mistake cannot be undone
+    paths: [CHANGE/migrations/**]
+  - area: release tooling
+    why: builds and releases everything else, with credentials that can write to production
+    paths: [.github/workflows/**]
