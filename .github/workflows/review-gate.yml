@@ -66,7 +66,9 @@ jobs:
           repository: theaiengineers/factory
           ref: ${{ inputs.factory_ref }}
           persist-credentials: false
-      - run: python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
+      - name: Install the one dependency, by hash, as a prebuilt wheel only
+        run: |
+          python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
       - name: Set the status
         env:
           GITHUB_TOKEN: ${{ github.token }}
