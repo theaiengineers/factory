@@ -18,8 +18,10 @@ Say this to anyone relying on it.
 
 - It reads the diff and the changed files. **It does not read the rest of the repository**, so it cannot follow a change into callers the change does not touch.
 - **It does not run the code or the tests.** It relies on your required checks for that, which is why it waits for them.
-- It will not review a change it cannot read in full: one with a file that is not plain text, a file GitHub will not show a diff for, or more than about 300,000 characters of diff. It posts a short notice saying a person is needed. GitHub lists a new binary file exactly as it lists a new empty one, so the reviewer fetches every file it has no diff for and refuses unless the file really is empty.
+- It will not review a change it cannot read in full: one with a file that is not plain text, a file GitHub will not show a diff for, more than 300 changed files, or more than about 300,000 characters of diff. A text file that contains characters GitHub cannot decode counts as not plain text. It posts a short notice saying a person is needed. GitHub lists a new binary file exactly as it lists a new empty one, so the reviewer fetches every file it has no diff for and refuses unless the file really is empty.
 - If a person records a review of the same commit while the automatic one is running, the person's stands and the automatic one is dropped.
+- Any review marker posted from the workflow account for a commit, signed or not, stops the automatic reviewer for that commit. An unsigned one never counts as a review, so another workflow that posts one can only leave the commit to a person.
+- A required check that was cancelled counts as failed. Push again or re-run it, then start the reviewer by hand.
 - Each record says what was read, so a reader never has to guess.
 
 A model can be wrong, and it can be misled by the change it is reading. Treat its pass as a careful first reader, not as proof.
@@ -33,7 +35,7 @@ A pull request is written by someone the reviewer should not take orders from. A
 - **The model does not write the record.** It fills in a small form. The factory's code checks the form, writes the marker line itself, and turns the model's words into plain text: no link, image, mention, issue reference or HTML in them renders.
 - **Two rules are applied by code, not left to the model.** A pass that lists a blocking finding is recorded as findings. A pass on a change that contains text addressed to the reviewer is recorded as findings, with the text quoted, so a person looks at why it is there.
 - **The job that holds the model's credential cannot write anything.** A second job, which never sees the credential, posts the record.
-- **The record is signed.** The reviewer posts from `github-actions[bot]`, the account every workflow in a repository shares. That account alone proves nothing: another workflow that repeats text from a pull request could post a forged marker from it. So the record carries a proof made with a key only your repository holds, tied to the repository, the pull request, the commit and the verdict. The gate counts a record from that account only when the proof is right.
+- **The record is signed.** The reviewer posts from `github-actions[bot]`, the account every workflow in a repository shares. That account alone proves nothing: another workflow that repeats text from a pull request could post a forged marker from it. So the record carries a proof made with a key only your repository holds, tied to the repository, the pull request, the commit and the verdict. The gate counts a record from that account only when the proof is right. A signed record is public once posted, so the gate also counts each signed verdict once (the same text posted again is ignored), and an automatic pass never clears findings a person recorded for the same commit.
 - **The standard and the rules come from the default branch,** so a pull request cannot rewrite what it is judged against.
 
 What this does not stop: a change that talks the model into missing a real problem without addressing it directly. That is why an automatic pass counts only for the levels you allow, and by default not for high-risk changes.
@@ -104,7 +106,7 @@ Like the gate, it starts working once it is on the default branch.
 
 Open a pull request with a small real code change. After its required checks pass, a comment headed "Automatic review" should appear and the `independent-review` status should turn. Then try a change inside a risk area: with `passes: [code]` the status should say the automatic review passed and a person's review is still needed.
 
-If nothing appears, read the reviewer workflow's run. Its log says in one line why it did not review. A missing model credential shows as a warning on the run; a missing reviewer key fails the record job. If the record appears and the status does not turn, the gate workflow has not been given the key.
+If nothing appears, read the reviewer workflow's run. Its log says in one line why it did not review. A missing model credential shows as a warning on the run; a missing reviewer key fails the record job. If the status turns and later turns back, the gate workflow has not been given the key: the reviewer's own run of the gate has it, and the gate workflow's next run does not.
 
 ## What it costs
 

@@ -111,7 +111,7 @@ If the repository already enforces a review rule of its own and the owner wants 
 
 The gate needs a comment on the pull request, from an account that can write to the repository, whose first line is the marker for the exact head commit. How the review comes to be done is up to the team. Three arrangements work today:
 
-- **The automatic reviewer** (v0.3.0 or later): a model reviews each change when its tests pass, with nobody starting it. It needs a model credential and a line in `factory.yml`, and by default a high-risk change still needs a person. Set it up after this guide, from [its own page](AUTOMATIC_REVIEWER.md).
+- **The automatic reviewer** (v0.3.0 or later): a model reviews each change when its tests pass, with nobody starting it. It needs a model credential, a signing key and a line in `factory.yml`, and by default a high-risk change still needs a person. Set it up after this guide, from [its own page](AUTOMATIC_REVIEWER.md).
 
 - **A person** reads the change against the standard and posts the record.
 - **A fresh agent**, started for this one review and given only the pull request and the standard. It must not be the session that wrote the change, and it must not be shown the author's reasoning: a reviewer handed the author's conclusion tends to confirm it. A brief that works:

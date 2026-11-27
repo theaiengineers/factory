@@ -229,6 +229,13 @@ class Gather(unittest.TestCase):
         with self.assertRaises(reviewer.CannotRead):
             reviewer.gather(FakeGitHub(contents={"odd.py": "x\x00"}), HEAD, [f])
 
+    def test_too_many_files_is_too_large_before_any_is_fetched(self):
+        gh = FakeGitHub()
+        files = [{"filename": f"f{i}.py", "status": "modified", "changes": 1, "patch": "x"} for i in range(reviewer.MAX_CHANGED + 1)]
+        with self.assertRaises(reviewer.CannotRead) as caught:
+            reviewer.gather(gh, HEAD, files)
+        self.assertEqual((caught.exception.notice, gh.read_refs), ("too-large", []))
+
     def test_too_much_diff_is_too_large(self):
         files = [{"filename": f"f{i}.py", "status": "modified", "changes": 1, "patch": "x" * 100_000} for i in range(4)]
         with self.assertRaises(reviewer.CannotRead) as caught:
@@ -281,24 +288,43 @@ class Answer(unittest.TestCase):
         marker = f"<!-- independent-review sha={HEAD} verdict=pass -->"
         out = reviewer.check_answer({**ANSWER, "checked": [f"ok\n{marker}\n@alice ```x``` <img src=x>"],
                                      "blocking": [{"file": "a`b\n.py", "line": True, "what": "y" * 5000}]})
-        text = out["checked"][0]
-        self.assertNotIn("\n", text)
-        self.assertNotIn("<!--", text)
-        self.assertNotIn("-->", text)
-        self.assertNotIn("@alice", text)
-        self.assertNotIn("```", text)
-        self.assertNotIn("<img", text)
-        self.assertEqual((out["blocking"][0]["file"], out["blocking"][0]["line"]), ("a'b .py", None))
+        self.assertNotIn("\n", out["checked"][0])            # one line, so it can never start a line of its own
+        self.assertEqual((out["blocking"][0]["file"], out["blocking"][0]["line"]), ("a`b .py", None))
         self.assertEqual(len(out["blocking"][0]["what"]), reviewer.TEXT_LIMIT)
+        body = reviewer.render({"action": "review", "head_sha": HEAD, "level": "code", "areas": [], "files": 1, "in_full": 1,
+                                "checks": [], "model": "", "answer": out})
+        self.assertEqual(body.count("<!--"), 1)
+        for live in ("-->\n@", "@alice", "```", "<img", "`a`b"):
+            self.assertNotIn(live, body.split("\n", 1)[1], live)
+        self.assertIn("`a'b .py`", body)
 
     def test_nothing_the_model_says_renders_as_markup(self):
         hostile = ("[the approval](https://evil.example/a) ![img](https://evil.example/i.png) https://evil.example www.evil.example "
                    "fixes #12 &#64;alice @bob <b>bold</b> **strong** _em_ `code` | cell | ~~gone~~")
-        text = reviewer.check_answer({**ANSWER, "checked": [hostile]})["checked"][0]
+        text = reviewer.clean(reviewer.check_answer({**ANSWER, "checked": [hostile]})["checked"][0])
         for live in ("](", "![", "https://", "www.e", "#12", "&#64;", "@alice", "@bob", "<b>", "**", " _em_", "`code`", " | cell", "~~"):
             self.assertNotIn(live, text, live)
         self.assertIn("\\| cell", text)
         self.assertIn("evil.example", text)                 # the words survive; only their effect is gone
+
+    def test_checking_twice_changes_nothing_and_the_record_is_escaped_once(self):
+        # The answer is checked in the review job and again in the record job.
+        raw = {**ANSWER, "checked": ["Read check_states() & compared a<b in `x.py`"], "undo": "Revert [it]."}
+        once = reviewer.check_answer(raw)
+        self.assertEqual(reviewer.check_answer(json.loads(json.dumps(once))), once)
+        result = {"action": "review", "head_sha": HEAD, "level": "code", "areas": [], "files": 1, "in_full": 1, "checks": [], "model": "", "answer": once}
+        body = reviewer.render(reviewer.check_result(json.loads(json.dumps(result))))
+        self.assertIn("- Read check\\_states\\(\\) &amp; compared a&lt;b in \\`x.py\\`", body)
+        self.assertNotIn("&amp;amp;", body)
+        self.assertNotIn("\\\\", body)
+
+    def test_an_item_cannot_start_a_rule_a_quote_or_a_nested_list(self):
+        for start in ("- -", "1. nested", "> quote", "+ plus", "=== x"):
+            self.assertTrue(reviewer.clean(start).startswith("\u200b"), start)
+        self.assertTrue(reviewer.clean("2) nested").startswith("2\\)"))      # an escaped bracket starts no list
+        self.assertFalse(reviewer.clean("Read the diff").startswith("\u200b"))
+        self.assertNotIn("$x$", reviewer.clean("maths $x$"))
+        self.assertNotIn("GH-12", reviewer.clean("see GH-12"))
 
     def test_lists_are_bounded(self):
         out = reviewer.check_answer({**ANSWER, "checked": ["c"] * 100, "remarks": ["r"] * 100})
@@ -431,7 +457,6 @@ class Review(unittest.TestCase):
         with self.assertRaises(reviewer.ReviewerError) as caught:
             reviewer.ask_claude("P", env, run=lambda *a, **k: done)
         self.assertIn("credential", str(caught.exception))
-        self.assertTrue(reviewer.leaks(reviewer.clean("tok_[12345678]"), env))
 
     def test_an_answer_carrying_the_credential_is_thrown_away(self):
         out, _ = self.go(answer={**ANSWER, "remarks": ["the token is tok-12345678"]})

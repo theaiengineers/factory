@@ -120,7 +120,12 @@ def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | 
 
     Returns {"verdict": "pass" | "findings" | None, "stale": sha of the newest record for another commit or None,
     "malformed": n, "early": n, "held": n}. `held` counts passes from the automatic reviewer that were not counted
-    because `automatic_passes` is false: they neither pass the commit nor clear earlier findings. The newest record for the head commit wins, so findings posted after a pass block
+    because `automatic_passes` is false: they neither pass the commit nor clear earlier findings.
+
+    Two more rules for automatic records, because a signed record is public once posted and anything that can
+    comment from the reviewer's account can post the same text again. An automatic verdict for a commit counts
+    once: a later record carrying the same verdict is a repeat and is ignored. And an automatic pass never clears
+    findings a person recorded for the same commit; only a person's pass does. The newest record for the head commit wins, so findings posted after a pass block
     again and a pass posted after findings clears them. A record whose comment was created before the head commit was
     made (`head_committed_at`, ISO 8601 UTC) cannot be a review of it and is not counted. Only records whose
     association is in TRUSTED_ASSOCIATIONS count; pass the comments through `trust_writers` first, which sets it from
@@ -128,6 +133,7 @@ def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | 
     """
     head = head_sha.lower()
     verdict, stale, malformed, early, held = None, None, 0, 0, 0
+    by_person, counted = False, set()
     for c in sorted(comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)):
         automatic = c.get("author_association") == AUTOMATIC
         if not automatic and c.get("author_association") not in TRUSTED_ASSOCIATIONS:
@@ -142,10 +148,17 @@ def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | 
             stale = marker[0]
         elif head_committed_at and (c.get("created_at") or "") < head_committed_at:
             early += 1
+        elif automatic and marker[1] in counted:
+            continue
         elif automatic and marker[1] == PASS and not automatic_passes:
+            counted.add(PASS)
             held += 1
+        elif automatic and marker[1] == PASS and verdict == FINDINGS and by_person:
+            counted.add(PASS)
         else:
-            verdict = marker[1]
+            if automatic:
+                counted.add(marker[1])
+            verdict, by_person = marker[1], not automatic
     return {"verdict": verdict, "stale": stale, "malformed": malformed, "early": early, "held": held}
 
 

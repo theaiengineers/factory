@@ -43,6 +43,7 @@ from . import config, review_gate, risk
 
 MAX_TOTAL = 300_000              # characters of pull request text given to the model
 MAX_FILE = 80_000                # a changed file longer than this is given as its diff only
+MAX_CHANGED = 300                # changed files; each is fetched, and the job's token has an hourly limit
 WAIT_SECONDS = 20                # between looks at the required checks
 MODEL_SECONDS = 900              # one review
 TEXT_LIMIT = 600                 # characters kept of each thing the model says
@@ -109,7 +110,9 @@ def plan(gh, number: int, force: bool = False) -> dict:
     if len(files) >= review_gate.MAX_FILES:
         return {**out, "why": "GitHub does not list every changed file", "notice": "too-large"}
     # This step does not hold the reviewer key, so it cannot check a proof. Any record from the reviewer's account
-    # is taken here as "already reviewed": a forged one can only save a review, never count as one.
+    # is taken here as "already reviewed". A forged one never counts as a review, but it does stop this commit being
+    # reviewed automatically: another workflow that can comment can switch the reviewer off for a commit, and a
+    # person then reviews it.
     comments = review_gate.trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000), review["automatic"], lambda c: True)
     committed_at = gh.get(f"commits/{head}")["commit"]["committer"]["date"]
     record = review_gate.latest_record(comments, head, committed_at, automatic_passes=True)
@@ -185,6 +188,8 @@ def gather(gh, head_sha: str, files: list[dict]) -> dict:
     is fetched, and it is accepted only when it is a removed file, an added file that really is empty, or a renamed
     file whose text can be read. Anything else cannot be judged, and neither can a file that is not plain text."""
     parts, used, in_full = [], 0, 0
+    if len(files) > MAX_CHANGED:
+        raise CannotRead("too-large")
     for f in files:
         name, status, patch = f.get("filename") or "", f.get("status") or "", f.get("patch")
         text = None
@@ -325,33 +330,40 @@ def parse_answer(text) -> dict:
 
 
 # ── checking and writing the record ────────────────────────────────────────────────────────────────────────────────
-ESCAPED = "\\`*_[]()!|~"            # Markdown punctuation that acts inside a line: a backslash makes it plain text
-BROKEN = (("@", "@\u200b"), ("#", "#\u200b"), ("://", ":\u200b//"), ("www.", "www\u200b."))
+ESCAPED = "\\`*_[]()!|~$"           # Markdown punctuation that acts inside a line: a backslash makes it plain text
+BROKEN = (("@", "@\u200b"), ("#", "#\u200b"), ("://", ":\u200b//"), ("www.", "www\u200b."), ("GH-", "GH\u200b-"))
+LINE_STARTS = re.compile(r"(?:[-+>=]|\d+[.)])")      # what would turn a list item into a rule, a quote or a nested list
+
+
+def tidy(text, limit: int = TEXT_LIMIT) -> str:
+    """Words kept as data: one line, bounded, otherwise exactly as given. Nothing is escaped here, so checking an
+    answer twice (once in each job) gives the same answer. `clean` and `clean_code` make it safe where it is shown."""
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
 def clean(text, limit: int = TEXT_LIMIT) -> str:
-    """Model words made plain text for a comment: one line, bounded, and nothing in them renders as anything.
+    """Words made plain text for a comment, at the moment they are written into it: nothing in them renders.
 
     HTML (so also an HTML comment or a character reference) is escaped; Markdown punctuation is escaped, so there
-    is no link, image, emphasis, heading, table or code; and the things GitHub links by itself (a mention, an issue
-    number, a bare address) are broken with an invisible space."""
-    text = " ".join(str(text).split())
-    text = text if len(text) <= limit else text[:limit - 1] + "…"
+    is no link, image, emphasis, table, code or maths; and the things GitHub links by itself (a mention, an issue
+    number, a bare address) are broken with an invisible space, as is anything that would start a list or a rule."""
+    text = tidy(text, limit)
     text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
     text = "".join("\\" + ch if ch in ESCAPED else ch for ch in text)
     for bad, good in BROKEN:
         text = text.replace(bad, good)
-    return text
+    return ("\u200b" + text) if LINE_STARTS.match(text) else text
 
 
 def clean_code(text, limit: int = 200) -> str:
-    """Model or pull request words for the inside of a code span, where nothing renders: one line, no backtick."""
-    text = " ".join(str(text).split()).replace("`", "'").replace("<!--", "<! --").replace("-->", "-- >")
-    return text if len(text) <= limit else text[:limit - 1] + "…"
+    """Words for the inside of a code span, where nothing renders: one line, no backtick, no HTML comment."""
+    return tidy(text, limit).replace("`", "'").replace("<!--", "<! --").replace("-->", "-- >")
 
 
 def check_answer(answer) -> dict:
-    """The model's form, checked and cleaned. Raises ReviewerError when it is not the form.
+    """The model's form, checked and bounded. Raises ReviewerError when it is not the form. The words are kept as
+    given (see `tidy`); `render` is what makes them safe to show. Checking a checked answer changes nothing.
 
     Two rules are applied here, not left to the model: a pass with a blocking finding is findings, and so is a pass
     on a change that carries text addressed to the reviewer."""
@@ -362,14 +374,14 @@ def check_answer(answer) -> dict:
         items = answer.get(key) or []
         if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
             raise ReviewerError(f"The model's answer has a malformed `{key}`")
-        out[key] = [clean(i) for i in items[:LIST_LIMITS[key]] if i.strip()]
+        out[key] = [tidy(i) for i in items[:LIST_LIMITS[key]] if i.strip()]
     blocking = answer.get("blocking") or []
     if not isinstance(blocking, list) or not all(isinstance(b, dict) and isinstance(b.get("what"), str) for b in blocking):
         raise ReviewerError("The model's answer has a malformed `blocking`")
-    out["blocking"] = [{"file": clean_code(b.get("file") or "") if isinstance(b.get("file") or "", str) else "",
+    out["blocking"] = [{"file": tidy(b.get("file") or "", 200) if isinstance(b.get("file") or "", str) else "",
                         "line": b["line"] if isinstance(b.get("line"), int) and not isinstance(b.get("line"), bool) and 0 < b["line"] < 10_000_000 else None,
-                        "what": clean(b["what"])} for b in blocking[:LIST_LIMITS["blocking"]] if b["what"].strip()]
-    out["undo"] = clean(answer.get("undo") or "") if isinstance(answer.get("undo") or "", str) else ""
+                        "what": tidy(b["what"])} for b in blocking[:LIST_LIMITS["blocking"]] if b["what"].strip()]
+    out["undo"] = tidy(answer.get("undo") or "") if isinstance(answer.get("undo") or "", str) else ""
     if out["verdict"] == review_gate.PASS and not out["checked"]:
         raise ReviewerError("The model passed the change without saying what it checked")
     if out["blocking"] or out["addressed_to_reviewer"]:
@@ -380,12 +392,15 @@ def check_answer(answer) -> dict:
 
 
 def render(result: dict, proof: str | None = None) -> str:
-    """The review record. The marker line and every heading are written here; the model supplied only list items.
+    """The review record. The marker line and every heading are written here; the model supplied only list items,
+    and each is made plain text here (`clean`, or `clean_code` inside a code span), once.
     `proof` is the reviewer's proof line (review_gate.proof_line), which goes second."""
     answer, sha = result["answer"], result["head_sha"]
     verdict = answer["verdict"]
     areas = f" ({', '.join(clean(a, 80) for a in result['areas'])})" if result.get("areas") else ""
-    answer = {**answer, "blocking": [{**b, "file": clean_code(b["file"])} for b in answer["blocking"]]}
+    answer = {"verdict": verdict, "undo": clean(answer["undo"]),
+              **{k: [clean(i) for i in answer[k]] for k in ("checked", "remarks", "addressed_to_reviewer")},
+              "blocking": [{"file": clean_code(b["file"]), "line": b["line"], "what": clean(b["what"])} for b in answer["blocking"]]}
     lines = [f"<!-- independent-review sha={sha} verdict={verdict} -->"] + ([proof] if proof else []) + [
              f"## Automatic review: {verdict}", "",
              f"Level: {result['level']}{areas}. Commit `{sha[:7]}`. Reviewed by a model"
@@ -440,7 +455,7 @@ def check_result(result) -> dict:
 def leaks(text: str, environ) -> bool:
     """True when the text carries a credential this process holds."""
     held = [environ[n] for n in CREDENTIALS + ("GITHUB_TOKEN", "FACTORY_REVIEWER_KEY") if len(environ.get(n) or "") >= 8]
-    return any(v in text or clean(v, len(v)) in text for v in held)
+    return any(v in text for v in held)
 
 
 # ── the two steps ──────────────────────────────────────────────────────────────────────────────────────────────────

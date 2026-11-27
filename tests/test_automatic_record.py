@@ -57,8 +57,29 @@ class Decide(unittest.TestCase):
         state, _ = review_gate.decide(HIGH, HEAD, [auto("findings", n=1), auto(n=2)], automatic=CODE_ONLY)
         self.assertEqual(state, "failure")
 
-    def test_an_allowed_automatic_pass_clears_findings_like_any_newer_record(self):
-        self.assertEqual(review_gate.decide(CODE, HEAD, [person("findings", n=1), auto(n=2)], automatic=CODE_ONLY)[0], "success")
+    def test_an_automatic_pass_never_clears_a_persons_findings(self):
+        for automatic in (CODE_ONLY, BOTH):
+            state, description = review_gate.decide(CODE, HEAD, [person("findings", n=1), auto(n=2)], automatic=automatic)
+            self.assertEqual(state, "failure")
+            self.assertIn("open findings", description)
+        # a person's pass does, and an automatic pass after that changes nothing
+        self.assertEqual(review_gate.decide(CODE, HEAD, [person("findings", n=1), auto(n=2), person(n=3)], automatic=CODE_ONLY)[0], "success")
+
+    def test_an_automatic_pass_clears_automatic_findings(self):
+        self.assertEqual(review_gate.decide(CODE, HEAD, [auto("findings", n=1), auto(n=2)], automatic=CODE_ONLY)[0], "success")
+
+    def test_a_signed_record_posted_again_is_a_repeat_and_is_ignored(self):
+        # The signed text is public, so anything that can comment from the reviewer's account can post it again.
+        replayed_pass = [auto(n=1), person("findings", n=2), auto(n=3)]
+        self.assertEqual(review_gate.decide(CODE, HEAD, replayed_pass, automatic=CODE_ONLY)[0], "failure")
+        replayed_findings = [auto("findings", n=1), person(n=2), auto("findings", n=3)]
+        self.assertEqual(review_gate.decide(CODE, HEAD, replayed_findings, automatic=CODE_ONLY)[0], "success")
+        held_twice = review_gate.latest_record([auto(n=1), auto(n=2)], HEAD, automatic_passes=False)
+        self.assertEqual((held_twice["verdict"], held_twice["held"]), (None, 1))
+
+    def test_a_repeat_for_another_commit_is_only_stale(self):
+        other = note(marker(sha="b" * 40), 3, review_gate.AUTOMATIC)
+        self.assertEqual(review_gate.decide(CODE, HEAD, [auto(n=1), other], automatic=CODE_ONLY)[0], "success")
 
     def test_without_an_automatic_reviewer_such_a_record_never_passes(self):
         # decide is given the association only when trust_writers set it; with no reviewer named, nothing is allowed.
