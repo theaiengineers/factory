@@ -1,0 +1,69 @@
+# An example factory file for a made-up shop with three production lines.
+# See ../spec/factory-file.md for what each key means.
+
+spec: factory/0.1
+factory: example
+building: example/shop
+branch: main
+
+# The shared belt: every change passes these before it can merge.
+intake:
+  - station: testing
+    uses: checks
+    require: [unit, integration]
+  - station: qa
+    uses: independent-review
+    standard: docs/REVIEW_STANDARD.md
+    skip_when_only: [docs/**, "**/*.md", "**/test_*"]
+
+# What needs extra care, and why.
+risk:
+  - area: payments
+    why: moves money; a mistake charges real customers
+    paths: [api/billing/**]
+  - area: sign-in
+    why: decides who is let in and holds customers' credentials
+    paths: [api/auth/**]
+  - area: deletion
+    why: deletes stored customer data; a mistake cannot be undone
+    paths: [api/retention/**, scripts/delete_*]
+
+# One line for each place this repository releases to.
+lines:
+  - id: api
+    feeds: [api/**, migrations/**]
+    adapter: aws-lambda
+    stations:
+      - staging: { check: smoke }
+      - gate:
+          unattended: true
+          hold_when:
+            - risk: high
+            - changed: [migrations/**]
+            - changed_release_path: true
+            - open_action: release-failed
+          wait_while: previous_watch_running
+      - shipping
+      - evaluate: { watch: 50m, compare: 7d, on_breach: rollback }
+
+  - id: website
+    feeds: [site/**]
+    adapter: static-site
+    stations: [publish]
+
+  - id: cli
+    feeds: [cli/package.json]   # only a version bump ships
+    adapter: npm
+    stations: [publish]
+
+people:
+  action_needed: [octocat]
+
+events:
+  - sink: https://events.example.com/factory
+
+extensions:
+  - station: licence-scan
+    uses: acme/licence-scan@1
+    on: intake
+    may: [send_back]
