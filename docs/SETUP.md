@@ -56,7 +56,7 @@ Copy `starter/factory.yml` from the factory to the root of the repository as `fa
 
 **The risky areas.** For each: a name, the paths, and a `why`. The `why` is shown to the reviewer on every high-risk change, so write what goes wrong for a real person, not what the code is ("moves money; a mistake charges real customers", not "billing module"). Fewer, sharper areas are better than many. If everything is high risk, nothing is. A small repository may have only one, usually its workflows; that is a fine answer. Rewrite the `why` of every example you keep so that it is true of this repository.
 
-**The paths a review may skip.** A change that touches only these needs no review at all. Start with prose (`"**/*.md"`) and stop there unless the owner asks for more. Three things to tell them before they add any:
+**The paths a review may skip.** A change that touches only these needs no review at all. Start with prose (`"**/*.md"`) and stop there unless the owner asks for more. Four things to tell them before they add any:
 
 - A skipped path is skipped even inside a risky area.
 - Skipping tests means a change can delete a test, or loosen what it asserts, with nobody looking.
@@ -137,7 +137,7 @@ Then do the first half of step 9 (the three pull requests and their statuses) wi
 - require these status checks: each test check from the readiness report, and `independent-review`;
 - do not let administrators bypass the rules. An administrator's merge that skips the gate is the one nobody will notice.
 
-Require `independent-review` by that exact name. A pull request also shows a check called `gate / gate`: that is the workflow job that works the answer out, and it is green whenever it ran, whatever it decided. Do not require it in place of the status.
+Require `independent-review` by that exact name. A pull request also shows a check called `gate / gate`: that is the workflow job that works the answer out, and it is green when it reached an answer, whichever answer that was. Do not require it in place of the status.
 
 GitHub's own "required approvals" can stay at zero. The independent review is recorded as a comment and enforced by the status, and where one account does all the work nobody could give a GitHub approval anyway. A team that already requires approvals can keep them; the two do not conflict.
 
@@ -157,7 +157,7 @@ EOF
 gh api repos/OWNER/REPO/branches/BRANCH/protection
 ```
 
-`strict: false` means a pull request need not be up to date with the branch before merging; that is the owner's choice and not something the factory needs. When rules already exist, change them in the repository's settings pages, or read the existing protection and send it back with these added.
+`strict: false` means a pull request need not be up to date with the branch before merging; that is the owner's choice and not something the factory needs. Read the protection again just before sending it, in case something was added since the readiness check. When rules already exist, do not send this request. Change them in the repository's settings pages; or, if status checks are already required, add the names and nothing else with `gh api -X POST repos/OWNER/REPO/branches/BRANCH/protection/required_status_checks/contexts -f 'contexts[]=independent-review'`.
 
 Once `independent-review` is required, a pull request on which the gate has not reported cannot merge. That is intended. It also means that if the workflow is ever removed or cannot start, merging stops until it is fixed or the requirement is lifted (see "Turning it off").
 
@@ -171,7 +171,7 @@ Open three small pull requests and watch the `independent-review` status on each
 | A line of real code outside every risk area | Not passed: "No independent review recorded for" the commit. The summary on the run lists the code that changed |
 | A file inside a risk area | Not passed, naming the area. The summary gives the area, the file, the rule and why the area matters |
 
-The summary is on the workflow run's page: follow the "Details" link beside the status, or `gh run view RUN --repo OWNER/REPO` and open the link it prints. It is not in the run's log.
+The summary is on the workflow run's page: follow the "Details" link beside the status, or `gh run view RUN --repo OWNER/REPO` and open the link it prints. The same text is printed in the job's log.
 
 On one that is waiting, have the reviewer from step 7 do a real review and post the record. The status should turn to passed once the workflow has run again, which the comment starts. Then push another commit to it: the status should go back to not passed, saying the review is for the earlier commit.
 
