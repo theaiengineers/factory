@@ -145,9 +145,10 @@ class FakeGitHub:
         self.prs, self.state, self.fail_on, self.statuses, self.comment_reads, self.file_reads = prs, state, fail_on, [], 0, []
         self.permissions, self.permission_reads, self.sibling_reads, self.arrives = {"reviewer": "write"}, [], 0, {}
         self.fork, self.unknown, self.later_comments = False, (), {}
+        self.paths, self.pr_reads, self.closed, self.closes, self.pr_read_fails_at, self.lookup_error = [], 0, set(), {}, None, None
 
     def _pr(self, number):
-        return {"number": number, "state": self.state, "head": {"sha": HEAD},
+        return {"number": number, "state": "closed" if number in self.closed else self.state, "head": {"sha": HEAD},
                 "base": {"ref": self.prs[number][0], "sha": OLD, "repo": {"default_branch": "main"}}}
 
     def _maybe_fail(self, what):
@@ -155,8 +156,11 @@ class FakeGitHub:
             raise OSError(f"HTTP 502 on {what}")
 
     def get(self, path):
+        self.paths.append(path)
         if path.startswith("collaborators/"):
             self._maybe_fail("permission")
+            if self.lookup_error:
+                raise urllib.error.HTTPError("u", self.lookup_error, "refused", None, None)
             login = urllib.parse.unquote(path.split("/")[1])
             self.permission_reads.append(login)
             if login in self.unknown:
@@ -165,7 +169,13 @@ class FakeGitHub:
         if path.startswith("commits/"):
             self._maybe_fail("commit")
             return {"commit": {"committer": {"date": self.committed_at}}}
-        return self._pr(int(path.rsplit("/", 1)[1]))
+        number = int(path.rsplit("/", 1)[1])
+        self.pr_reads += 1
+        if self.pr_reads == self.pr_read_fails_at:
+            raise OSError("HTTP 502 on the pull request")
+        if self.closes.get(number) == self.pr_reads:                 # closed or merged while the gate runs
+            self.closed.add(number)
+        return self._pr(number)
 
     def pages(self, path, limit):
         if path.startswith("commits/"):
@@ -251,11 +261,16 @@ class Evaluate(unittest.TestCase):
         gh.permissions = {"second": "write"}
         self.assertEqual(review_gate.evaluate(gh, 7)["state"], "failure")
         self.assertEqual(review_gate.evaluate(one(BILLING, [posted(marker())], fail_on="permission"), 7)["state"], "error")
+        for refused in (403, 429, 500, 503):                                      # GitHub's own answers, not only a dead network
+            gh = one(BILLING, records)
+            gh.lookup_error = refused
+            self.assertEqual(review_gate.evaluate(gh, 7)["state"], "error", refused)
 
     def test_an_account_github_does_not_know_is_untrusted_and_its_login_is_quoted(self):
         gh = one(BILLING, [posted(marker(), 1, "NONE", "odd[bot]")])
         gh.unknown = ("odd[bot]",)
         self.assertEqual((review_gate.evaluate(gh, 7)["state"], gh.permission_reads), ("failure", ["odd[bot]"]))
+        self.assertIn("collaborators/odd%5Bbot%5D/permission", gh.paths)           # the path as it was asked for
         gh = one(BILLING, [{**posted(marker()), "user": None}])                   # a deleted account
         self.assertEqual(review_gate.evaluate(gh, 7)["state"], "failure")
 
@@ -331,6 +346,37 @@ class Main(unittest.TestCase):
         code, _ = self.run_main(gh)
         self.assertEqual((code, [s[1] for s in gh.statuses]), (0, ["success", "failure"]))
 
+    def test_a_stale_pass_is_corrected_even_when_the_pull_request_is_merged_before_the_gate_looks_again(self):
+        # #7 (prose, into a side branch) is judged before #8 (billing, into main, same head commit) exists. #7's
+        # stale `success` is what lets it auto-merge, so by the time the gate judges again #7 is no longer open. The
+        # run wrote that `success`: it must still replace it with what the commit's open pull request needs.
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {8: (1, ("main", BILLING, []))}
+        gh.closes = {7: 3}                       # the third read of #7: after the write and the first look back
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (0, ["success", "failure"]))
+        self.assertIn("No independent review recorded", gh.statuses[-1][2])
+
+    def test_a_pull_request_closed_before_the_gate_ever_wrote_sets_nothing(self):
+        gh = one(BILLING, state="closed")
+        code, out = self.run_main(gh)
+        self.assertEqual((code, gh.statuses), (0, []))
+        self.assertIn("not open", out)
+
+    def test_failing_to_read_the_pull_request_when_looking_again_ends_as_an_error(self):
+        gh = one(BILLING, [posted(marker())])
+        gh.pr_read_fails_at = 2                  # the first read judged it; the read for the look back fails
+        code, out = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (1, ["success", "error"]))
+        self.assertIn("could not judge again", gh.statuses[-1][2])
+
+    def test_failing_to_read_the_pull_request_before_anything_was_written_fails_the_job_and_sets_nothing(self):
+        gh = one(BILLING, [posted(marker())])
+        gh.pr_read_fails_at = 1
+        with self.assertRaises(OSError):
+            self.run_main(gh)
+        self.assertEqual(gh.statuses, [])
+
     def test_a_pull_request_from_a_fork_which_the_listing_omits_gets_its_status_once(self):
         gh = one(BILLING, [posted(marker())])
         gh.fork = True
@@ -352,7 +398,7 @@ class Main(unittest.TestCase):
             code, _ = self.run_main(gh)
         self.assertEqual((code, [s[1] for s in gh.statuses]), (1, ["success", "success", "success", "error"]))
 
-    def test_failing_to_judge_again_after_the_write_ends_as_an_error(self):
+    def test_a_failed_listing_when_looking_again_ends_as_an_error(self):
         gh = one(BILLING, [posted(marker())])
         real = gh.pages
 

@@ -36,7 +36,7 @@ Rules the gate enforces:
 - **A record is for one commit.** A new commit needs a new review.
 - **Every review is a new comment.** Never edit or replace an earlier record. A send-back is part of the change's history.
 - **The newest record for the head commit wins.** Findings posted after a pass block again; a pass posted after findings clears them.
-- **Only accounts that can write to the repository count.** The gate looks up what each account may do; being a member of the organisation is not enough.
+- **Only accounts that can write to the repository count.** The gate looks up what each account may do; being a member of the organisation is not enough. This is checked each time the gate runs, so a record from someone who has since lost write access stops counting, findings included. A record posted by a GitHub App does not count.
 
 ## What this is and is not
 

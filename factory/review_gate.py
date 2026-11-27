@@ -280,7 +280,10 @@ def evaluate(gh: GitHub, number: int) -> dict:
         siblings = [p for p in gh.pages(f"commits/{head_sha}/pulls", 1000)
                     if p.get("state") == "open" and p["head"]["sha"] == head_sha and p["number"] != number]
         cfg = load_config(gh, pr["base"]["repo"]["default_branch"])
-        result["results"] = [evaluate_one(gh, p, cfg) for p in [pr] + siblings]
+        # A closed pull request no longer needs anything of the commit: the open ones sharing it are judged. With
+        # none of those, the pull request asked about is judged, so there is always an answer.
+        subjects = ([pr] if result["open"] else []) + siblings
+        result["results"] = [evaluate_one(gh, p, cfg) for p in subjects or [pr]]
     except config.ConfigError as e:
         result.update(state="error", exception=e, description=_fit(f"Gate could not decide: {e}"))
         return result
@@ -307,24 +310,41 @@ def main(argv: list[str] | None = None) -> int:
     # share a head commit: a run that judged the commit before a second pull request was opened on it, or before
     # findings were recorded, could otherwise write its `success` after another run's `failure`. Whichever run writes
     # last also looks last, and corrects the status if the answer is no longer the one it wrote.
-    for attempt in range(1, RECHECKS + 1):
-        result = evaluate(gh, args.pr)
-        code = report(gh, result, args)
-        if args.dry_run or not result["open"] or result["state"] == "error":
-            return code
-        check = evaluate(gh, args.pr)
-        if all(check[k] == result[k] for k in ("head_sha", "state", "description")):
-            return code
-        print(f"The answer for {result['head_sha'][:7]} changed while it was judged: judging again ({attempt}/{RECHECKS}).")
+    #
+    # Once this run has written a status it owns that status. From then on a changed answer is written even if the
+    # pull request has been closed or merged meanwhile (a stale `success` is exactly what triggers an auto-merge),
+    # and a failure to judge again ends in `error`, never in a status this run wrote and could not confirm.
+    wrote = None                     # the head commit this run has written a status on
+    try:
+        for attempt in range(1, RECHECKS + 1):
+            result = evaluate(gh, args.pr)
+            code = report(gh, result, args, force=wrote is not None)
+            if args.dry_run or (wrote is None and not result["open"]):
+                return code
+            wrote = result["head_sha"]
+            if result["state"] == "error":
+                return code
+            check = evaluate(gh, args.pr)
+            if all(check[k] == result[k] for k in ("head_sha", "state", "description")):
+                return code
+            print(f"The answer for {wrote[:7]} changed while it was judged: judging again ({attempt}/{RECHECKS}).")
+        why = "the answer kept changing while it ran"
+    except Exception as e:  # noqa: BLE001
+        if wrote is None:
+            raise                    # nothing written by this run: the job fails, as it would have
+        why = f"it could not judge again ({type(e).__name__})"
+        print(f"Could not judge {wrote[:7]} again: {e!r}")
     # Never leave a status that may be stale: say the gate could not decide.
-    description = _fit("Gate could not decide: the answer kept changing while it ran; re-run the review-gate job")
-    gh.set_status(result["head_sha"], "error", description, None, args.context)
-    print(f"Set {args.context}=error on {result['head_sha']}.")
+    gh.set_status(wrote, "error", _fit(f"Gate could not decide: {why}; re-run the review-gate job"), None, args.context)
+    print(f"Set {args.context}=error on {wrote}.")
     return 1
 
 
-def report(gh, result: dict, args) -> int:
-    """Prints the decision, writes the job summary and sets the status. Returns the job's exit code."""
+def report(gh, result: dict, args, force: bool = False) -> int:
+    """Prints the decision, writes the job summary and sets the status. Returns the job's exit code.
+
+    No status is set for a pull request that is not open, unless `force`: this run already wrote one and must
+    correct it."""
     if result["state"] == "error":
         text = f"## independent-review: error\n\n{result['description']}\n\n`{result['exception']!r}`\n"
     else:
@@ -337,7 +357,7 @@ def report(gh, result: dict, args) -> int:
             fh.write(text)
     if args.dry_run:
         print("Dry run: no status set.")
-    elif not result["open"]:
+    elif not result["open"] and not force:
         print("The pull request is not open: no status set.")
     else:
         run_url = None
