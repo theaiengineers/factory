@@ -31,5 +31,6 @@ jobs:
       pr: ${{ inputs.pr }}
       force: ${{ inputs.force || false }}
     secrets:
+      reviewer_key: ${{ secrets.FACTORY_REVIEWER_KEY }}
       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}

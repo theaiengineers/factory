@@ -4,11 +4,14 @@ Only the parts that code in this package reads are checked. Keys the engine does
 """
 from __future__ import annotations
 
+import re
+
 import yaml
 
 FILE = "factory.yml"
 SPEC_PREFIX = "factory/0."
 REVIEW = "independent-review"
+BOT_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\[bot\]")
 AUTOMATIC_LEVELS = ("code", "high")      # the levels an automatic reviewer's pass can be allowed to count for
 
 
@@ -33,11 +36,14 @@ def _automatic(value, where: str) -> dict | None:
         return None
     if not isinstance(value, dict):
         raise ConfigError(f"{where}.automatic must be a mapping with `account`")
+    unknown = sorted((k for k in value if k not in ("account", "passes")), key=str)
+    if unknown:
+        raise ConfigError(f"{where}.automatic has a key it does not know: {unknown[0]}")
     account = value.get("account")
-    if not isinstance(account, str) or not account.endswith("[bot]") or len(account) <= len("[bot]"):
+    if not isinstance(account, str) or not BOT_LOGIN.fullmatch(account):
         raise ConfigError(f"{where}.automatic.account must be a bot's login, such as github-actions[bot]")
     passes = value.get("passes", ["code"])
-    if not isinstance(passes, list) or not passes or not all(p in AUTOMATIC_LEVELS for p in passes):
+    if not isinstance(passes, list) or "code" not in passes or not all(p in AUTOMATIC_LEVELS for p in passes):
         raise ConfigError(f"{where}.automatic.passes must list code, or code and high")
     return {"account": account, "passes": list(dict.fromkeys(passes))}
 

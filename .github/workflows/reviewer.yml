@@ -20,6 +20,7 @@ name: reviewer
 #       with:
 #         factory_ref: <the same commit>
 #       secrets:
+#         reviewer_key: ${{ secrets.FACTORY_REVIEWER_KEY }}
 #         claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}     # or anthropic_api_key
 #
 # It does nothing unless the factory file on the default branch names an automatic reviewer (review station,
@@ -29,7 +30,9 @@ name: reviewer
 #   review   holds the model's credential and can only read. It never checks out or runs the pull request: it reads
 #            the diff and the changed files through the API as text and gives them to the model, which has no tools.
 #   record   can comment and set a status, and never holds the model's credential. It checks the review job's
-#            result again, writes the record itself, and runs the gate.
+#            result again, writes the record itself, signs it with the reviewer key, and runs the gate. The gate
+#            counts a record from the workflow account only with that signature, so another workflow in the same
+#            repository cannot post one that counts. Pass the same key to your gate workflow.
 # Nothing here may ever check out `github.event.pull_request.head` or run a file from it.
 #
 # PINNING. As for review-gate.yml: pin `uses:` and `factory_ref` to the same full commit id. That commit fixes the
@@ -64,6 +67,9 @@ on:
         type: number
         default: 20
     secrets:
+      reviewer_key:
+        description: A long random value (32 characters or more) that signs the reviewer's records. Give the gate the same one.
+        required: false
       claude_code_oauth_token:
         description: A Claude subscription token from `claude setup-token`.
         required: false
@@ -73,14 +79,15 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: reviewer-${{ inputs.context }}-${{ inputs.pr || github.event.pull_request.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    # A newer commit cancels a review of an older one. The record job below is never cancelled: stopped between
+    # posting the record and running the gate, it would leave the status behind the record.
+    concurrency:
+      group: reviewer-${{ inputs.context }}-${{ inputs.pr || github.event.pull_request.number }}
+      cancel-in-progress: true
     permissions:
       contents: read
       pull-requests: read
@@ -144,6 +151,7 @@ jobs:
           PR_NUMBER: ${{ inputs.pr || github.event.pull_request.number }}
           CONTEXT: ${{ inputs.context }}
           RESULT: ${{ needs.review.outputs.result }}
+          FACTORY_REVIEWER_KEY: ${{ secrets.reviewer_key }}
         run: |
           printf '%s' "$RESULT" > "$RUNNER_TEMP/result.json"
           python3 -m factory.reviewer record --pr "$PR_NUMBER" --result "$RUNNER_TEMP/result.json" --context "$CONTEXT"

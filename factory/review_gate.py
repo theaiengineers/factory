@@ -30,6 +30,8 @@ the rules come from the factory file on the DEFAULT BRANCH, so a pull request ca
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -57,7 +59,15 @@ UNTRUSTED = "NONE"
 # A record from the automatic reviewer the factory file names (review station, `automatic.account`). `trust_writers`
 # gives it this association. It counts like a writer's, except that its pass counts only for the levels the factory
 # file lists under `automatic.passes`; its findings always count.
+#
+# The account alone proves nothing: `github-actions[bot]` is the login of every workflow in a repository, and a
+# workflow that echoes text from a pull request would post a forged marker from it. So an automatic record counts
+# only when its second line carries a proof: an HMAC, keyed with a secret only the repository holds
+# (FACTORY_REVIEWER_KEY), over the repository, the pull request number, the commit and the verdict. A proof cannot
+# be made without the key and cannot be moved to another pull request, commit or verdict.
 AUTOMATIC = "AUTOMATIC"
+PROOF = re.compile(r"^<!--\s*factory-reviewer-proof\s+v1\s+([0-9a-f]{64})\s*-->\s*$")
+KEY_MIN = 32                     # characters; a shorter key is treated as no key
 RECHECKS = 3                     # times the commit is judged again when the answer changes while the gate runs
 WRITE_PERMISSIONS = ("admin", "maintain", "write")
 ATTEMPTS = 3                     # per API call, for a network fault or a 5xx / rate-limit answer
@@ -73,6 +83,30 @@ def parse_marker(body: str | None) -> tuple[str, str] | None:
     first = (body or "").lstrip().split("\n", 1)[0].strip()
     m = MARKER.match(first)
     return (m.group(1).lower(), m.group(2)) if m else None
+
+
+def usable_key(key: str | None) -> bool:
+    return isinstance(key, str) and len(key) >= KEY_MIN
+
+
+def proof(key: str, repo: str, number: int, sha: str, verdict: str) -> str:
+    message = f"v1\n{repo.lower()}\n{int(number)}\n{sha.lower()}\n{verdict}".encode()
+    return hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
+
+
+def proof_line(key: str, repo: str, number: int, sha: str, verdict: str) -> str:
+    return f"<!-- factory-reviewer-proof v1 {proof(key, repo, number, sha, verdict)} -->"
+
+
+def is_proven(key: str | None, repo: str, number: int, body: str | None) -> bool:
+    """True when the comment is a well-formed record whose second line is the proof for exactly this repository,
+    pull request, commit and verdict. Without a usable key nothing is proven."""
+    marker = parse_marker(body)
+    if not marker or not usable_key(key) or not repo:
+        return False
+    lines = (body or "").lstrip().split("\n")
+    found = PROOF.match(lines[1].strip()) if len(lines) > 1 else None
+    return bool(found) and hmac.compare_digest(found.group(1), proof(key, repo, number, marker[0], marker[1]))
 
 
 def is_malformed_marker(body: str | None) -> bool:
@@ -171,8 +205,8 @@ def summary(tier: dict, state: str, description: str, head_sha: str, standard: s
 
 # ── GitHub API ─────────────────────────────────────────────────────────────────────────────────────────────────────
 class GitHub:
-    def __init__(self, repo: str, token: str):
-        self.repo, self.token = repo, token
+    def __init__(self, repo: str, token: str, reviewer_key: str = ""):
+        self.repo, self.token, self.reviewer_key = repo, token, reviewer_key
 
     def _request(self, method: str, path: str, body: dict | None = None, accept: str = "application/vnd.github+json") -> bytes:
         req = urllib.request.Request(
@@ -230,9 +264,11 @@ def load_config(gh, default_branch: str) -> dict:
     return config.parse(text)
 
 
-def trust_writers(gh, comments: list[dict], automatic: dict | None = None) -> list[dict]:
-    """Marks a record from the factory file's automatic reviewer (`automatic`, or None) as AUTOMATIC: the comment's
-    login is that account and GitHub says the account is a bot. No person can hold such a login.
+def trust_writers(gh, comments: list[dict], automatic: dict | None = None, proven=None) -> list[dict]:
+    """Marks a record from the factory file's automatic reviewer (`automatic`, or None) as AUTOMATIC when three
+    things hold: the comment's login is that account, GitHub says the account is a bot, and `proven(comment)` is
+    true (the record carries the reviewer's proof; see AUTOMATIC above). With no `proven` nothing is marked. A
+    comment from that account that fails any of these is judged like any other account's, and so does not count.
 
     Sets the association of every comment that carries (or attempts) a review marker from what the account may
     actually do: COLLABORATOR when it can write to the repository, otherwise untrusted. The permission is asked for
@@ -246,7 +282,8 @@ def trust_writers(gh, comments: list[dict], automatic: dict | None = None) -> li
     for c in comments:
         marked = parse_marker(c.get("body")) or is_malformed_marker(c.get("body"))
         user = c.get("user") or {}
-        if marked and automatic and user.get("login") == automatic["account"] and user.get("type") == "Bot":
+        if (marked and automatic and proven and user.get("login") == automatic["account"] and user.get("type") == "Bot"
+                and proven(c)):
             c = {**c, "author_association": AUTOMATIC}
         elif c.get("author_association") != "OWNER" and marked:
             login = (user.get("login") or "").strip()
@@ -281,7 +318,9 @@ def evaluate_one(gh: GitHub, pr: dict, cfg: dict) -> dict:
         tier["areas"] = sorted(set(tier["areas"]) | {"unreadable diff"})
     comments, committed_at = [], None
     if tier["review"] != risk.NONE:
-        comments = trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000), automatic)
+        key, repo = getattr(gh, "reviewer_key", ""), getattr(gh, "repo", "")
+        proven = (lambda c: is_proven(key, repo, number, c.get("body"))) if automatic else None
+        comments = trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000), automatic, proven)
         committed_at = gh.get(f"commits/{head_sha}")["commit"]["committer"]["date"]
     state, description = decide(tier, head_sha, comments, committed_at, standard, automatic)
     return {**base, "tier": tier, "state": state, "description": description, "standard": standard}
@@ -372,7 +411,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--context", default=CONTEXT, help="name of the status to set (default: %(default)s)")
     ap.add_argument("--dry-run", action="store_true", help="print the decision; set nothing")
     args = ap.parse_args(argv)
-    gh = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"])
+    gh = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"], os.environ.get("FACTORY_REVIEWER_KEY", ""))
     # Settle the pull request's head commit. If the pull request has a new head commit by the time that is done,
     # settle that one as well. The commit it left was settled for whichever pull requests stayed on it.
     code, settled = 0, []

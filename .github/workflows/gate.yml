@@ -18,3 +18,5 @@ jobs:
     uses: ./.github/workflows/review-gate.yml
     with:
       factory_ref: main
+    secrets:
+      reviewer_key: ${{ secrets.FACTORY_REVIEWER_KEY }}

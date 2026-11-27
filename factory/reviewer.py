@@ -6,7 +6,9 @@ It runs in two steps, meant for two jobs with different powers (.github/workflow
     review   reads the pull request through the API, asks the model, and writes the result as JSON.
              It holds the model's credential and can only read the repository.
     record   checks that JSON again, posts the review record as a pull request comment, and runs the gate.
-             It can comment and set a status, and it never holds the model's credential.
+             It can comment and set a status, and it never holds the model's credential. It holds the
+             reviewer key (FACTORY_REVIEWER_KEY) and signs the record with it: the gate counts a record from the
+             workflow account only when that proof is there (review_gate.AUTOMATIC).
 
 SAFETY. The pull request is read through the GitHub API as text. Its code is never checked out and never run. The
 model is given that text and nothing else: no tools, no files, no network, an empty directory. Everything in a pull
@@ -28,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -97,19 +100,21 @@ def plan(gh, number: int, force: bool = False) -> dict:
     review = cfg["review"]
     if not review or not review.get("automatic"):
         return {**out, "why": f"{config.FILE} names no automatic reviewer"}
+    if not force and not can_write(gh, (pr.get("user") or {}).get("login")):
+        return {**out, "why": "the author cannot write to the repository; a maintainer can start the review by hand"}
     files = gh.pages(f"pulls/{number}/files", review_gate.MAX_FILES)
     tier = risk.classify(files, cfg)
     if tier["review"] == risk.NONE:
         return {**out, "why": "the change needs no review"}
     if len(files) >= review_gate.MAX_FILES:
         return {**out, "why": "GitHub does not list every changed file", "notice": "too-large"}
-    comments = review_gate.trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000), review["automatic"])
+    # This step does not hold the reviewer key, so it cannot check a proof. Any record from the reviewer's account
+    # is taken here as "already reviewed": a forged one can only save a review, never count as one.
+    comments = review_gate.trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000), review["automatic"], lambda c: True)
     committed_at = gh.get(f"commits/{head}")["commit"]["committer"]["date"]
     record = review_gate.latest_record(comments, head, committed_at, automatic_passes=True)
     if record["verdict"]:
         return {**out, "why": "this commit already has a review record"}
-    if not force and not can_write(gh, (pr.get("user") or {}).get("login")):
-        return {**out, "why": "the author cannot write to the repository; a maintainer can start the review by hand"}
     return {**out, "action": "review", "why": "", "pr_object": pr, "cfg": cfg, "files": files, "tier": tier}
 
 
@@ -135,16 +140,15 @@ def check_states(gh, sha: str, names: list[str]) -> dict[str, str]:
     statuses = gh.get(f"commits/{sha}/status?per_page=100").get("statuses") or []
     out = {}
     for name in names:
-        mine = sorted((r for r in runs if r.get("name") == name), key=lambda r: (r.get("started_at") or "", r.get("id") or 0))
-        status = next((s for s in statuses if s.get("context") == name), None)
-        if mine:
-            newest = mine[-1]
-            out[name] = ("pending" if newest.get("status") != "completed"
-                         else "passed" if newest.get("conclusion") in PASSED_CONCLUSIONS else "failed")
-        elif status:
-            out[name] = {"success": "passed", "pending": "pending"}.get(status.get("state"), "failed")
-        else:
-            out[name] = "pending"
+        # A re-run makes a new check run in the same suite, so the newest in each suite is the one that stands. Two
+        # workflows can report under one name, and a status can share it too: every one of them has to pass.
+        newest: dict = {}
+        for r in sorted((r for r in runs if r.get("name") == name), key=lambda r: (r.get("started_at") or "", r.get("id") or 0)):
+            newest[(r.get("check_suite") or {}).get("id")] = r
+        seen = ["pending" if r.get("status") != "completed" else "passed" if r.get("conclusion") in PASSED_CONCLUSIONS else "failed"
+                for r in newest.values()]
+        seen += [{"success": "passed", "pending": "pending"}.get(s.get("state"), "failed") for s in statuses if s.get("context") == name]
+        out[name] = "failed" if "failed" in seen else "pending" if "pending" in seen or not seen else "passed"
     return out
 
 
@@ -176,30 +180,43 @@ def gather(gh, head_sha: str, files: list[dict]) -> dict:
     """The change as text: {"text", "files": n, "in_full": n}. Raises CannotRead when part of it cannot be shown.
 
     Every changed file is shown as its diff. A file is also shown in full, as it is at the head commit, while there
-    is room. A file with changes and no diff (binary, or too large for GitHub to show) cannot be judged."""
+    is room. GitHub gives no diff for a binary file or one too large to show, and lists an added binary file exactly
+    as it lists an added empty one (no diff, no lines changed). So a file with no diff is never taken on trust: it
+    is fetched, and it is accepted only when it is a removed file, an added file that really is empty, or a renamed
+    file whose text can be read. Anything else cannot be judged, and neither can a file that is not plain text."""
     parts, used, in_full = [], 0, 0
     for f in files:
         name, status, patch = f.get("filename") or "", f.get("status") or "", f.get("patch")
-        if patch is None and (f.get("changes") or status in ("added", "modified", "changed")):
-            if not (status == "added" and not f.get("changes") and not f.get("additions")):
+        text = None
+        if status != "removed":
+            try:
+                text = gh.raw_file(name, head_sha)
+            except urllib.error.HTTPError:
+                text = None
+            if text is not None and ("\x00" in text or "\ufffd" in text):
                 raise CannotRead("unreadable")
+        if patch is None:
+            if status == "removed" and not f.get("changes"):
+                shown = "(file removed; GitHub shows no lines for it)"
+            elif status == "added" and not f.get("changes") and text == "":
+                shown = "(a new, empty file)"
+            elif status == "renamed" and not f.get("changes") and text is not None:
+                shown = "(renamed; no lines changed)"
+            else:
+                raise CannotRead("unreadable")
+        else:
+            shown = patch
         was = f" (was {f['previous_filename']})" if f.get("previous_filename") else ""
-        block = f"FILE {name}{was} [{status}]\nDIFF:\n{patch or '(no lines changed)'}\n"
+        block = f"FILE {name}{was} [{status}]\nDIFF:\n{shown}\n"
         used += len(block)
         if used > MAX_TOTAL:
             raise CannotRead("too-large")
-        parts.append([block, name, status])
+        parts.append([block, text])
     for part in parts:
-        block, name, status = part
-        if status == "removed":
+        text = part[1]
+        if not text or len(text) > MAX_FILE or used + len(text) > MAX_TOTAL:
             continue
-        try:
-            text = gh.raw_file(name, head_sha)
-        except urllib.error.HTTPError:
-            continue
-        if "\x00" in text or len(text) > MAX_FILE or used + len(text) > MAX_TOTAL:
-            continue
-        part[0] = block + f"FULL TEXT AT THE REVIEWED COMMIT:\n{text}\n"
+        part[0] += f"FULL TEXT AT THE REVIEWED COMMIT:\n{text}\n"
         used += len(text)
         in_full += 1
     return {"text": "\n".join(p[0] for p in parts), "files": len(parts), "in_full": in_full}
@@ -287,6 +304,8 @@ def ask_claude(prompt: str, environ, model: str | None = None, binary: str = "cl
     if not isinstance(envelope, dict) or envelope.get("is_error") or done.returncode != 0:
         kind = envelope.get("subtype") if isinstance(envelope, dict) else None
         raise ReviewerError(f"The model call failed (exit code {done.returncode}, {kind or 'no reason given'})")
+    if isinstance(envelope.get("result"), str) and leaks(envelope["result"], environ):
+        raise ReviewerError("The model's answer carried a credential and was thrown away")
     return parse_answer(envelope.get("result"))
 
 
@@ -306,11 +325,28 @@ def parse_answer(text) -> dict:
 
 
 # ── checking and writing the record ────────────────────────────────────────────────────────────────────────────────
+ESCAPED = "\\`*_[]()!|~"            # Markdown punctuation that acts inside a line: a backslash makes it plain text
+BROKEN = (("@", "@\u200b"), ("#", "#\u200b"), ("://", ":\u200b//"), ("www.", "www\u200b."))
+
+
 def clean(text, limit: int = TEXT_LIMIT) -> str:
-    """Model words made safe to put in a comment: one line, no HTML comment, no mention, no code fence, bounded."""
+    """Model words made plain text for a comment: one line, bounded, and nothing in them renders as anything.
+
+    HTML (so also an HTML comment or a character reference) is escaped; Markdown punctuation is escaped, so there
+    is no link, image, emphasis, heading, table or code; and the things GitHub links by itself (a mention, an issue
+    number, a bare address) are broken with an invisible space."""
     text = " ".join(str(text).split())
-    for bad, good in (("<!--", "<! --"), ("-->", "-- >"), ("@", "@​"), ("```", "'''"), ("<", "&lt;")):
+    text = text if len(text) <= limit else text[:limit - 1] + "…"
+    text = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    text = "".join("\\" + ch if ch in ESCAPED else ch for ch in text)
+    for bad, good in BROKEN:
         text = text.replace(bad, good)
+    return text
+
+
+def clean_code(text, limit: int = 200) -> str:
+    """Model or pull request words for the inside of a code span, where nothing renders: one line, no backtick."""
+    text = " ".join(str(text).split()).replace("`", "'").replace("<!--", "<! --").replace("-->", "-- >")
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
@@ -330,7 +366,7 @@ def check_answer(answer) -> dict:
     blocking = answer.get("blocking") or []
     if not isinstance(blocking, list) or not all(isinstance(b, dict) and isinstance(b.get("what"), str) for b in blocking):
         raise ReviewerError("The model's answer has a malformed `blocking`")
-    out["blocking"] = [{"file": clean(b.get("file") or "", 200).replace("`", "'"),
+    out["blocking"] = [{"file": clean_code(b.get("file") or "") if isinstance(b.get("file") or "", str) else "",
                         "line": b["line"] if isinstance(b.get("line"), int) and not isinstance(b.get("line"), bool) and 0 < b["line"] < 10_000_000 else None,
                         "what": clean(b["what"])} for b in blocking[:LIST_LIMITS["blocking"]] if b["what"].strip()]
     out["undo"] = clean(answer.get("undo") or "") if isinstance(answer.get("undo") or "", str) else ""
@@ -343,24 +379,27 @@ def check_answer(answer) -> dict:
     return out
 
 
-def render(result: dict) -> str:
-    """The review record. The marker line and every heading are written here; the model supplied only list items."""
+def render(result: dict, proof: str | None = None) -> str:
+    """The review record. The marker line and every heading are written here; the model supplied only list items.
+    `proof` is the reviewer's proof line (review_gate.proof_line), which goes second."""
     answer, sha = result["answer"], result["head_sha"]
     verdict = answer["verdict"]
     areas = f" ({', '.join(clean(a, 80) for a in result['areas'])})" if result.get("areas") else ""
-    lines = [f"<!-- independent-review sha={sha} verdict={verdict} -->",
+    answer = {**answer, "blocking": [{**b, "file": clean_code(b["file"])} for b in answer["blocking"]]}
+    lines = [f"<!-- independent-review sha={sha} verdict={verdict} -->"] + ([proof] if proof else []) + [
              f"## Automatic review: {verdict}", "",
              f"Level: {result['level']}{areas}. Commit `{sha[:7]}`. Reviewed by a model"
-             + (f" (`{clean(result['model'], 60).replace('`', '')}`)" if result.get("model") else "")
+             + (f" (`{clean_code(result['model'], 60)}`)" if result.get("model") else "")
              + " through the factory's automatic reviewer.", "",
              f"**What it read.** The diff of {result['files']} changed file(s), and {result['in_full']} of them in full. "
              "It did not run the code or the tests, and it did not read files the change does not touch."]
     if result.get("checks"):
         lines.append("**Tests first.** These required checks had passed for this commit before the review: "
-                     + ", ".join(f"`{clean(c, 80).replace('`', '')}`" for c in result["checks"]) + ".")
+                     + ", ".join(f"`{clean_code(c, 80)}`" for c in result["checks"]) + ".")
     lines += ["", "**Checked**"] + ([f"- {c}" for c in answer["checked"]] or ["- (nothing listed)"])
     lines += ["", "**Blocking findings**"]
-    lines += [f"- `{b['file']}`" + (f" line {b['line']}" if b["line"] else "") + f": {b['what']}" for b in answer["blocking"]] or ["- None."]
+    lines += [(f"- `{b['file']}`" if b["file"] else "- (no file named)") + (f" line {b['line']}" if b["line"] else "") + f": {b['what']}"
+              for b in answer["blocking"]] or ["- None."]
     if answer["addressed_to_reviewer"]:
         lines += ["", "**Text in the change that is addressed to the reviewer.** The reviewer does not act on such "
                       "text, and a change that carries it is not passed automatically. A person should look at why it is there."]
@@ -378,10 +417,10 @@ def check_result(result) -> dict:
     if not isinstance(result, dict) or result.get("action") not in ("review", "skip"):
         raise ReviewerError("The result is not from the review step")
     sha = result.get("head_sha")
-    if not isinstance(sha, str) or not review_gate.MARKER.match(f"<!-- independent-review sha={sha} verdict=pass -->"):
+    if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
         raise ReviewerError("The result names no commit")
     if result["action"] == "skip":
-        if result.get("notice") != QUIET and result.get("notice") not in NOTICES:
+        if not isinstance(result.get("notice"), str) or (result["notice"] != QUIET and result["notice"] not in NOTICES):
             raise ReviewerError("The result carries an unknown notice")
         return {"action": "skip", "head_sha": sha.lower(), "notice": result["notice"]}
     if result.get("level") not in (risk.CODE, risk.HIGH):
@@ -400,7 +439,8 @@ def check_result(result) -> dict:
 
 def leaks(text: str, environ) -> bool:
     """True when the text carries a credential this process holds."""
-    return any(len(environ.get(n) or "") >= 8 and environ[n] in text for n in CREDENTIALS + ("GITHUB_TOKEN",))
+    held = [environ[n] for n in CREDENTIALS + ("GITHUB_TOKEN", "FACTORY_REVIEWER_KEY") if len(environ.get(n) or "") >= 8]
+    return any(v in text or clean(v, len(v)) in text for v in held)
 
 
 # ── the two steps ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -439,7 +479,7 @@ def review(gh, number: int, environ, force: bool = False, wait_minutes: float = 
     return result
 
 
-def record(gh, number: int, result, context: str = review_gate.CONTEXT, run_gate=None) -> str:
+def record(gh, number: int, result, context: str = review_gate.CONTEXT, run_gate=None, key: str = "") -> str:
     """The record step: posts the record (or a notice), then runs the gate. Returns one line saying what it did.
 
     A comment posted with a workflow's own token does not start other workflows, so the gate would never see the
@@ -448,14 +488,35 @@ def record(gh, number: int, result, context: str = review_gate.CONTEXT, run_gate
     pr = gh.get(f"pulls/{number}")
     if pr.get("state") != "open" or pr["head"]["sha"].lower() != result["head_sha"]:
         return "The pull request moved on while it was being reviewed: nothing recorded."
+    comments = gh.pages(f"issues/{number}/comments", 10_000)
     if result["action"] == "skip":
         if result["notice"] == QUIET:
             return "Nothing to record."
-        gh._request("POST", f"issues/{number}/comments", {"body": f"**Automatic review: not done.** {NOTICES[result['notice']]}\n\nCommit `{result['head_sha'][:7]}`.\n"})
+        body = f"**Automatic review: not done.** {NOTICES[result['notice']]}\n\nCommit `{result['head_sha'][:7]}`.\n"
+        if any((c.get("body") or "").strip() == body.strip() for c in comments):
+            return f"The notice ({result['notice']}) is already on the pull request."
+        gh._request("POST", f"issues/{number}/comments", {"body": body})
         return f"Posted a notice ({result['notice']})."
-    gh._request("POST", f"issues/{number}/comments", {"body": render(result)})
-    (run_gate or (lambda: review_gate.main(["--pr", str(number), "--context", context])))()
-    return f"Recorded {result['answer']['verdict']} for {result['head_sha'][:7]} and ran the gate."
+    if not review_gate.usable_key(key):
+        raise ReviewerError("No reviewer key, so the record would not count: set the FACTORY_REVIEWER_KEY secret "
+                            f"(at least {review_gate.KEY_MIN} characters) and pass it as reviewer_key")
+    # The review took minutes. If anyone recorded a review of this commit meanwhile, theirs stands: an automatic
+    # pass posted now would be the newest record and would clear a person's findings.
+    cfg = review_gate.load_config(gh, pr["base"]["repo"]["default_branch"])
+    automatic = (cfg["review"] or {}).get("automatic")
+    if not automatic:
+        return f"{config.FILE} no longer names an automatic reviewer: nothing recorded."
+    trusted = review_gate.trust_writers(gh, comments, automatic, lambda c: review_gate.is_proven(key, gh.repo, number, c.get("body")))
+    committed_at = gh.get(f"commits/{result['head_sha']}")["commit"]["committer"]["date"]
+    if review_gate.latest_record(trusted, result["head_sha"], committed_at, automatic_passes=True)["verdict"]:
+        return "A review of this commit was recorded while this one ran: nothing recorded."
+    signed = review_gate.proof_line(key, gh.repo, number, result["head_sha"], result["answer"]["verdict"])
+    gh._request("POST", f"issues/{number}/comments", {"body": render(result, signed)})
+    code = (run_gate or (lambda: review_gate.main(["--pr", str(number), "--context", context])))()
+    said = f"Recorded {result['answer']['verdict']} for {result['head_sha'][:7]}"
+    if code:
+        raise ReviewerError(said + ", but the gate did not finish: re-run the gate workflow")
+    return said + " and ran the gate."
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -487,7 +548,7 @@ def main(argv: list[str] | None = None) -> int:
         except json.JSONDecodeError:
             result = None
     try:
-        print(record(gh, args.pr, result, args.context))
+        print(record(gh, args.pr, result, args.context, key=os.environ.get("FACTORY_REVIEWER_KEY", "")))
     except ReviewerError as e:
         print(str(e), file=sys.stderr)
         return 1
