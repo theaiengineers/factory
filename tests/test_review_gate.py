@@ -3,6 +3,7 @@ import io
 import os
 import unittest
 import urllib.error
+import urllib.parse
 from unittest import mock
 
 from factory import review_gate, risk
@@ -31,8 +32,14 @@ def marker(sha: str = HEAD, verdict: str = "pass") -> str:
     return f"<!-- independent-review sha={sha} verdict={verdict} -->"
 
 
-def comment(body: str, n: int = 1, association: str = "MEMBER") -> dict:
+def comment(body: str, n: int = 1, association: str = "COLLABORATOR") -> dict:
+    """A comment after trust_writers has set its association: COLLABORATOR is an account that can write."""
     return {"id": n, "created_at": f"2026-01-15T10:{n:02d}:00Z", "body": body, "author_association": association}
+
+
+def posted(body: str, n: int = 1, association: str = "MEMBER", login: str = "reviewer") -> dict:
+    """A comment as GitHub returns it, before the gate has looked up what its author may do."""
+    return {"id": n, "created_at": f"2026-01-15T10:{n:02d}:00Z", "body": body, "author_association": association, "user": {"login": login}}
 
 
 class Marker(unittest.TestCase):
@@ -109,7 +116,9 @@ class Decision(unittest.TestCase):
     def test_records_from_accounts_without_write_access_are_ignored(self):
         for association in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", None):
             self.assertEqual(review_gate.decide(HIGH, HEAD, [comment(marker(), association=association)])[0], "failure")
-        for association in ("OWNER", "MEMBER", "COLLABORATOR"):
+        # MEMBER is anyone in the organisation: it does not count until trust_writers has checked the account.
+        self.assertEqual(review_gate.decide(HIGH, HEAD, [comment(marker(), association="MEMBER")])[0], "failure")
+        for association in ("OWNER", "COLLABORATOR"):
             self.assertEqual(review_gate.decide(HIGH, HEAD, [comment(marker(), association=association)])[0], "success")
 
     def test_a_malformed_marker_fails_and_points_at_the_standard(self):
@@ -134,9 +143,12 @@ class FakeGitHub:
 
     def __init__(self, prs, state="open", fail_on=None):
         self.prs, self.state, self.fail_on, self.statuses, self.comment_reads, self.file_reads = prs, state, fail_on, [], 0, []
+        self.permissions, self.permission_reads, self.sibling_reads, self.arrives = {"reviewer": "write"}, [], 0, {}
+        self.fork, self.unknown, self.later_comments = False, (), {}
+        self.paths, self.pr_reads, self.closed, self.closes, self.pr_read_fails_at, self.lookup_error = [], 0, set(), {}, None, None
 
     def _pr(self, number):
-        return {"number": number, "state": self.state, "head": {"sha": HEAD},
+        return {"number": number, "state": "closed" if number in self.closed else self.state, "head": {"sha": HEAD},
                 "base": {"ref": self.prs[number][0], "sha": OLD, "repo": {"default_branch": "main"}}}
 
     def _maybe_fail(self, what):
@@ -144,27 +156,43 @@ class FakeGitHub:
             raise OSError(f"HTTP 502 on {what}")
 
     def get(self, path):
+        self.paths.append(path)
         if path.startswith("collaborators/"):
             self._maybe_fail("permission")
-            login = path.split("/")[1]
-            self.permission_reads = getattr(self, "permission_reads", []) + [login]
-            return {"permission": getattr(self, "permissions", {}).get(login, "read")}
+            if self.lookup_error:
+                raise urllib.error.HTTPError("u", self.lookup_error, "refused", None, None)
+            login = urllib.parse.unquote(path.split("/")[1])
+            self.permission_reads.append(login)
+            if login in self.unknown:
+                raise urllib.error.HTTPError("u", 404, "Not Found", None, None)
+            return {"permission": self.permissions.get(login, "read")}
         if path.startswith("commits/"):
             self._maybe_fail("commit")
             return {"commit": {"committer": {"date": self.committed_at}}}
-        return self._pr(int(path.rsplit("/", 1)[1]))
+        number = int(path.rsplit("/", 1)[1])
+        self.pr_reads += 1
+        if self.pr_reads == self.pr_read_fails_at:
+            raise OSError("HTTP 502 on the pull request")
+        if self.closes.get(number) == self.pr_reads:                 # closed or merged while the gate runs
+            self.closed.add(number)
+        return self._pr(number)
 
     def pages(self, path, limit):
         if path.startswith("commits/"):
             self._maybe_fail("siblings")
-            return [self._pr(n) for n in self.prs]
+            self.sibling_reads += 1
+            for number, (after, pr) in list(self.arrives.items()):      # a pull request opened while the gate runs
+                if self.sibling_reads > after:
+                    self.prs[number] = pr
+            return [] if self.fork else [self._pr(n) for n in self.prs]
         number = int(path.split("/")[1])
         if path.endswith("/files"):
             self._maybe_fail("files")
             return [dict(f) for f in self.prs[number][1]]
         self._maybe_fail("comments")
         self.comment_reads += 1
-        return self.prs[number][2]
+        after, extra = self.later_comments.get(number, (0, []))      # comments posted while the gate runs
+        return self.prs[number][2] + (extra if self.comment_reads > after else [])
 
     def raw_file(self, path, ref):
         self.file_reads.append((path, ref))
@@ -197,7 +225,7 @@ class Evaluate(unittest.TestCase):
 
     def test_a_high_risk_pull_request_follows_the_record(self):
         self.assertEqual(review_gate.evaluate(one(BILLING), 7)["state"], "failure")
-        self.assertEqual(review_gate.evaluate(one(BILLING, [comment(marker())]), 7)["state"], "success")
+        self.assertEqual(review_gate.evaluate(one(BILLING, [posted(marker())]), 7)["state"], "success")
 
     def test_a_pull_request_that_changes_the_factory_file_is_high_risk(self):
         result = review_gate.evaluate(one([{"filename": "factory.yml", "status": "modified"}]), 7)
@@ -205,21 +233,55 @@ class Evaluate(unittest.TestCase):
         self.assertIn("factory rules", result["description"])
 
     def test_the_head_commits_time_is_read_and_an_earlier_record_is_refused(self):
-        gh = one(BILLING, [comment(marker())])
+        gh = one(BILLING, [posted(marker())])
         gh.committed_at = "2026-01-15T11:00:00Z"
         self.assertIn("older than commit", review_gate.evaluate(gh, 7)["description"])
 
-    def test_a_writer_the_token_sees_as_a_contributor_is_trusted_and_a_reader_is_not(self):
-        def record(login):
-            return {**comment(marker(), association="CONTRIBUTOR"), "user": {"login": login}}
-        gh = one(BILLING, [record("writer"), record("writer")])
-        gh.permissions = {"writer": "write"}
-        self.assertEqual(review_gate.evaluate(gh, 7)["state"], "success")
-        self.assertEqual(gh.permission_reads, ["writer"])
-        self.assertEqual(review_gate.evaluate(one(BILLING, [record("reader")]), 7)["state"], "failure")
-        gh = one(BILLING, [record("writer")], fail_on="permission")
-        gh.permissions = {"writer": "admin"}
+    def test_only_an_account_that_can_write_to_the_repository_is_trusted_whatever_its_association(self):
+        for association in ("MEMBER", "CONTRIBUTOR", "COLLABORATOR", "NONE"):
+            with self.subTest(association=association):
+                gh = one(BILLING, [posted(marker(), 1, association, "writer"), posted(marker(), 2, association, "writer")])
+                gh.permissions = {"writer": "write"}
+                self.assertEqual(review_gate.evaluate(gh, 7)["state"], "success")
+                self.assertEqual(gh.permission_reads, ["writer"])                 # looked up once per account
+                # The same association from an account that can only read: an organisation member, say.
+                self.assertEqual(review_gate.evaluate(one(BILLING, [posted(marker(), 1, association, "reader")]), 7)["state"], "failure")
+
+    def test_an_owner_is_trusted_without_a_lookup(self):
+        gh = one(BILLING, [posted(marker(), 1, "OWNER", "owner")])
+        self.assertEqual((review_gate.evaluate(gh, 7)["state"], gh.permission_reads), ("success", []))
+
+    def test_a_failed_lookup_is_an_error_so_findings_the_gate_could_not_check_are_never_dropped(self):
+        # A pass, then findings from a second writer whose permission cannot be read. Dropping the findings would
+        # leave the pass standing.
+        records = [posted(marker(), 1, "OWNER", "owner"), posted(marker(verdict="findings"), 2, "MEMBER", "second")]
+        gh = one(BILLING, records, fail_on="permission")
+        self.assertEqual(review_gate.evaluate(gh, 7)["state"], "error")
+        gh = one(BILLING, records)
+        gh.permissions = {"second": "write"}
         self.assertEqual(review_gate.evaluate(gh, 7)["state"], "failure")
+        self.assertEqual(review_gate.evaluate(one(BILLING, [posted(marker())], fail_on="permission"), 7)["state"], "error")
+        for refused in (403, 429, 500, 503):                                      # GitHub's own answers, not only a dead network
+            gh = one(BILLING, records)
+            gh.lookup_error = refused
+            self.assertEqual(review_gate.evaluate(gh, 7)["state"], "error", refused)
+
+    def test_an_account_github_does_not_know_is_untrusted_and_its_login_is_quoted(self):
+        gh = one(BILLING, [posted(marker(), 1, "NONE", "odd[bot]")])
+        gh.unknown = ("odd[bot]",)
+        self.assertEqual((review_gate.evaluate(gh, 7)["state"], gh.permission_reads), ("failure", ["odd[bot]"]))
+        self.assertIn("collaborators/odd%5Bbot%5D/permission", gh.paths)           # the path as it was asked for
+        gh = one(BILLING, [{**posted(marker()), "user": None}])                   # a deleted account
+        self.assertEqual(review_gate.evaluate(gh, 7)["state"], "failure")
+
+    def test_only_comments_that_carry_a_marker_are_looked_up(self):
+        gh = one(BILLING, [posted("just a remark", 1, "NONE", "anyone")])
+        review_gate.evaluate(gh, 7)
+        self.assertEqual(gh.permission_reads, [])
+
+    def test_findings_from_an_account_that_cannot_write_do_not_block_a_trusted_pass(self):
+        gh = one(BILLING, [posted(marker(), 1), posted(marker(verdict="findings"), 2, "MEMBER", "reader")])
+        self.assertEqual(review_gate.evaluate(gh, 7)["state"], "success")
 
     def test_the_worst_result_among_pull_requests_sharing_the_head_commit_is_the_one_set(self):
         gh = FakeGitHub({7: ("side", DOCS, []), 8: ("main", BILLING, [])})
@@ -230,10 +292,10 @@ class Evaluate(unittest.TestCase):
     def test_any_failure_to_read_is_an_error_never_a_pass(self):
         for what in ("siblings", "files", "comments", "commit"):
             with self.subTest(what=what):
-                self.assertEqual(review_gate.evaluate(one(BILLING, [comment(marker())], fail_on=what), 7)["state"], "error")
+                self.assertEqual(review_gate.evaluate(one(BILLING, [posted(marker())], fail_on=what), 7)["state"], "error")
 
     def test_a_missing_or_unusable_factory_file_is_an_error_that_says_so(self):
-        gh = one(BILLING, [comment(marker())])
+        gh = one(BILLING, [posted(marker())])
         gh.factory = None
         result = review_gate.evaluate(gh, 7)
         self.assertEqual((result["state"], result["description"]), ("error", "Gate could not decide: No factory.yml on the default branch"))
@@ -263,15 +325,95 @@ class Main(unittest.TestCase):
         return code, out.getvalue()
 
     def test_sets_the_status_under_the_default_name(self):
-        gh = one(BILLING, [comment(marker())])
+        gh = one(BILLING, [posted(marker())])
         code, _ = self.run_main(gh)
         self.assertEqual((code, [(s[1], s[3]) for s in gh.statuses]), (0, [("success", "independent-review")]))
 
-    def test_a_shadow_run_sets_a_differently_named_status(self):
+    def test_a_pull_request_that_appears_on_the_same_commit_while_the_gate_runs_is_judged_before_the_run_ends(self):
+        # #7 changes only prose. #8, into main with the same head commit and a billing change, is opened after #7's
+        # run has listed the pull requests sharing the commit. Without the check after the write, #7's run would
+        # leave `success` on a commit that #8 needs reviewed.
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {8: (1, ("main", BILLING, []))}
+        code, out = self.run_main(gh)
+        self.assertEqual([s[1] for s in gh.statuses], ["success", "failure"])
+        self.assertEqual(code, 0)
+        self.assertIn("judging again", out)
+
+    def test_findings_recorded_on_a_sibling_while_the_gate_runs_are_seen_before_the_run_ends(self):
+        gh = FakeGitHub({7: ("side", BILLING, [posted(marker())]), 8: ("main", BILLING, [posted(marker())])})
+        gh.later_comments = {8: (2, [posted(marker(verdict="findings"), 5)])}     # after the first judging has read both
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (0, ["success", "failure"]))
+
+    def test_a_stale_pass_is_corrected_even_when_the_pull_request_is_merged_before_the_gate_looks_again(self):
+        # #7 (prose, into a side branch) is judged before #8 (billing, into main, same head commit) exists. #7's
+        # stale `success` is what lets it auto-merge, so by the time the gate judges again #7 is no longer open. The
+        # run wrote that `success`: it must still replace it with what the commit's open pull request needs.
+        gh = FakeGitHub({7: ("side", DOCS, [])})
+        gh.arrives = {8: (1, ("main", BILLING, []))}
+        gh.closes = {7: 3}                       # the third read of #7: after the write and the first look back
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (0, ["success", "failure"]))
+        self.assertIn("No independent review recorded", gh.statuses[-1][2])
+
+    def test_a_pull_request_closed_before_the_gate_ever_wrote_sets_nothing(self):
+        gh = one(BILLING, state="closed")
+        code, out = self.run_main(gh)
+        self.assertEqual((code, gh.statuses), (0, []))
+        self.assertIn("not open", out)
+
+    def test_failing_to_read_the_pull_request_when_looking_again_ends_as_an_error(self):
+        gh = one(BILLING, [posted(marker())])
+        gh.pr_read_fails_at = 2                  # the first read judged it; the read for the look back fails
+        code, out = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (1, ["success", "error"]))
+        self.assertIn("could not judge again", gh.statuses[-1][2])
+
+    def test_failing_to_read_the_pull_request_before_anything_was_written_fails_the_job_and_sets_nothing(self):
+        gh = one(BILLING, [posted(marker())])
+        gh.pr_read_fails_at = 1
+        with self.assertRaises(OSError):
+            self.run_main(gh)
+        self.assertEqual(gh.statuses, [])
+
+    def test_a_pull_request_from_a_fork_which_the_listing_omits_gets_its_status_once(self):
+        gh = one(BILLING, [posted(marker())])
+        gh.fork = True
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (0, ["success"]))
         gh = one(BILLING)
-        code, out = self.run_main(gh, "--context", "independent-review-shadow")
-        self.assertEqual((code, [(s[1], s[3]) for s in gh.statuses]), (0, [("failure", "independent-review-shadow")]))
-        self.assertIn("Set independent-review-shadow=failure", out)
+        gh.fork = True
+        self.assertEqual((self.run_main(gh)[0], [s[1] for s in gh.statuses]), (0, ["failure"]))
+
+    def test_an_answer_that_never_settles_ends_as_an_error_not_a_stale_pass(self):
+        gh = one(BILLING)
+        answers = iter(["success", "failure"] * 10)
+
+        def flip(_gh, number):
+            state = next(answers)
+            return {"pr": number, "open": True, "head_sha": HEAD, "state": state, "description": state,
+                    "results": [{"pr": number, "base": "main", "tier": NONE, "state": state, "description": state, "head_sha": HEAD}]}
+        with mock.patch.object(review_gate, "evaluate", flip):
+            code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (1, ["success", "success", "success", "error"]))
+
+    def test_a_failed_listing_when_looking_again_ends_as_an_error(self):
+        gh = one(BILLING, [posted(marker())])
+        real = gh.pages
+
+        def pages(path, limit):
+            if path.startswith("commits/") and gh.sibling_reads >= 1:
+                raise OSError("HTTP 502")
+            return real(path, limit)
+        gh.pages = pages
+        code, _ = self.run_main(gh)
+        self.assertEqual((code, [s[1] for s in gh.statuses]), (1, ["success", "error"]))
+
+    def test_a_settled_answer_is_judged_twice_and_written_once(self):
+        gh = one(BILLING, [posted(marker())])
+        self.run_main(gh)
+        self.assertEqual((gh.sibling_reads, len(gh.statuses)), (2, 1))
 
     def test_a_dry_run_and_a_closed_pull_request_set_nothing(self):
         gh = one(BILLING)
