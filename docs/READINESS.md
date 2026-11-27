@@ -97,7 +97,7 @@ The first command does not show who may bypass a ruleset, and leaves out ruleset
 
 ### A5. Someone other than the author can review, from an account that can write
 
-The gate counts a review record only from an account with write, maintain or admin permission on the repository. A record posted by a GitHub App, including the workflow's own token, does not count.
+The gate counts a review record only from an account with write, maintain or admin permission on the repository. A record posted by a GitHub App, including the workflow's own token, does not count, unless `factory.yml` names that account as its [automatic reviewer](AUTOMATIC_REVIEWER.md).
 
 ```
 gh api --paginate "repos/OWNER/REPO/collaborators?permission=push" --jq '.[].login'     # needs write access to list
@@ -105,7 +105,7 @@ gh api --paginate "repos/OWNER/REPO/collaborators?permission=push" --jq '.[].log
 
 Ask the owner who, or what, will review: a person, or a fresh agent that is given only the pull request and the review standard.
 
-- Ready: a reviewer is named, and it will post from an account on that list.
+- Ready: a reviewer is named, and it will post from an account on that list. The automatic reviewer also counts as a reviewer for the levels the owner allows it, if someone will supply a model credential; say who reviews the rest.
 - Ready, with a remark: author and reviewer are agents sharing one login. The gate allows it. Say plainly in the report that the review is then a habit the team keeps, not something the gate can prove.
 - Gap: no reviewer is arranged, or the planned reviewer posts as a GitHub App.
 

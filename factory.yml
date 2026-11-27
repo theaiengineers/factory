@@ -12,11 +12,14 @@ intake:
     uses: independent-review
     standard: docs/REVIEW_STANDARD.md
     skip_when_only: ["**/*.md", examples/**, LICENSE]
+    automatic:
+      account: github-actions[bot]
+      passes: [code]
 
 risk:
   - area: the gate
     why: decides whether other people's changes may merge; a fault passes what should fail
-    paths: [factory/review_gate.py, factory/risk.py, factory/config.py]
+    paths: [factory/review_gate.py, factory/risk.py, factory/config.py, factory/reviewer.py]
   - area: workflows
     why: runs in other repositories with a token that can write
-    paths: [.github/workflows/**]
+    paths: [.github/workflows/**, starter/*.yml, reviewer-runtime/**]

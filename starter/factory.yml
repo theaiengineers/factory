@@ -21,6 +21,11 @@ intake:
     uses: independent-review
     standard: docs/REVIEW_STANDARD.md
     skip_when_only: ["**/*.md"]
+    # To let the automatic reviewer's record count, uncomment these lines and add starter/factory-reviewer.yml.
+    # See https://github.com/theaiengineers/factory/blob/main/docs/AUTOMATIC_REVIEWER.md
+    # automatic:
+    #   account: github-actions[bot]
+    #   passes: [code]          # add high to let its pass stand for high-risk changes too
 
 # What needs extra care, and why. The `why` is shown to the reviewer, so write it for them:
 # say what goes wrong for a real person if this code is wrong.

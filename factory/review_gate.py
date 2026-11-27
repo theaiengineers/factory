@@ -30,6 +30,8 @@ the rules come from the factory file on the DEFAULT BRANCH, so a pull request ca
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -54,6 +56,18 @@ DESCRIPTION_LIMIT = 140          # GitHub's limit on a status description
 # OWNER is taken at its word. `latest_record` then counts the associations below.
 TRUSTED_ASSOCIATIONS = ("OWNER", "COLLABORATOR")
 UNTRUSTED = "NONE"
+# A record from the automatic reviewer the factory file names (review station, `automatic.account`). `trust_writers`
+# gives it this association. It counts like a writer's, except that its pass counts only for the levels the factory
+# file lists under `automatic.passes`; its findings always count.
+#
+# The account alone proves nothing: `github-actions[bot]` is the login of every workflow in a repository, and a
+# workflow that echoes text from a pull request would post a forged marker from it. So an automatic record counts
+# only when its second line carries a proof: an HMAC, keyed with a secret only the repository holds
+# (FACTORY_REVIEWER_KEY), over the repository, the pull request number, the commit and the verdict. A proof cannot
+# be made without the key and cannot be moved to another pull request, commit or verdict.
+AUTOMATIC = "AUTOMATIC"
+PROOF = re.compile(r"^<!--\s*factory-reviewer-proof\s+v1\s+([0-9a-f]{64})\s*-->\s*$")
+KEY_MIN = 32                     # characters; a shorter key is treated as no key
 RECHECKS = 3                     # times the commit is judged again when the answer changes while the gate runs
 WRITE_PERMISSIONS = ("admin", "maintain", "write")
 ATTEMPTS = 3                     # per API call, for a network fault or a 5xx / rate-limit answer
@@ -71,25 +85,58 @@ def parse_marker(body: str | None) -> tuple[str, str] | None:
     return (m.group(1).lower(), m.group(2)) if m else None
 
 
+def usable_key(key: str | None) -> bool:
+    return isinstance(key, str) and len(key) >= KEY_MIN
+
+
+def proof(key: str, repo: str, number: int, sha: str, verdict: str) -> str:
+    message = f"v1\n{repo.lower()}\n{int(number)}\n{sha.lower()}\n{verdict}".encode()
+    return hmac.new(key.encode(), message, hashlib.sha256).hexdigest()
+
+
+def proof_line(key: str, repo: str, number: int, sha: str, verdict: str) -> str:
+    return f"<!-- factory-reviewer-proof v1 {proof(key, repo, number, sha, verdict)} -->"
+
+
+def is_proven(key: str | None, repo: str, number: int, body: str | None) -> bool:
+    """True when the comment is a well-formed record whose second line is the proof for exactly this repository,
+    pull request, commit and verdict. Without a usable key nothing is proven."""
+    marker = parse_marker(body)
+    if not marker or not usable_key(key) or not repo:
+        return False
+    lines = (body or "").lstrip().split("\n")
+    found = PROOF.match(lines[1].strip()) if len(lines) > 1 else None
+    return bool(found) and hmac.compare_digest(found.group(1), proof(key, repo, number, marker[0], marker[1]))
+
+
 def is_malformed_marker(body: str | None) -> bool:
     first = (body or "").lstrip().split("\n", 1)[0].strip()
     return bool(MARKER_ATTEMPT.match(first)) and not MARKER.match(first)
 
 
-def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | None = None) -> dict:
+def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | None = None,
+                  automatic_passes: bool = False) -> dict:
     """What the pull request's comments record about `head_sha`.
 
     Returns {"verdict": "pass" | "findings" | None, "stale": sha of the newest record for another commit or None,
-    "malformed": n, "early": n}. The newest record for the head commit wins, so findings posted after a pass block
+    "malformed": n, "early": n, "held": n}. `held` counts passes from the automatic reviewer that were not counted
+    because `automatic_passes` is false: they neither pass the commit nor clear earlier findings.
+
+    Two more rules for automatic records, because a signed record is public once posted and anything that can
+    comment from the reviewer's account can post the same text again. An automatic verdict for a commit counts
+    once: a later record carrying the same verdict is a repeat and is ignored. And an automatic pass never clears
+    findings a person recorded for the same commit; only a person's pass does. The newest record for the head commit wins, so findings posted after a pass block
     again and a pass posted after findings clears them. A record whose comment was created before the head commit was
     made (`head_committed_at`, ISO 8601 UTC) cannot be a review of it and is not counted. Only records whose
     association is in TRUSTED_ASSOCIATIONS count; pass the comments through `trust_writers` first, which sets it from
     the account's real permission.
     """
     head = head_sha.lower()
-    verdict, stale, malformed, early = None, None, 0, 0
+    verdict, stale, malformed, early, held = None, None, 0, 0, 0
+    unanswered, counted = False, set()        # unanswered: a person's findings that no person has since passed
     for c in sorted(comments, key=lambda c: (c.get("created_at") or "", c.get("id") or 0)):
-        if c.get("author_association") not in TRUSTED_ASSOCIATIONS:
+        automatic = c.get("author_association") == AUTOMATIC
+        if not automatic and c.get("author_association") not in TRUSTED_ASSOCIATIONS:
             continue
         if is_malformed_marker(c.get("body")):
             malformed += 1
@@ -101,23 +148,37 @@ def latest_record(comments: list[dict], head_sha: str, head_committed_at: str | 
             stale = marker[0]
         elif head_committed_at and (c.get("created_at") or "") < head_committed_at:
             early += 1
+        elif automatic and marker[1] in counted:
+            continue
+        elif automatic and marker[1] == PASS and not automatic_passes:
+            counted.add(PASS)
+            held += 1
+        elif automatic and marker[1] == PASS and unanswered:
+            counted.add(PASS)
         else:
+            if automatic:
+                counted.add(marker[1])
+            else:
+                unanswered = marker[1] == FINDINGS
             verdict = marker[1]
-    return {"verdict": verdict, "stale": stale, "malformed": malformed, "early": early}
+    return {"verdict": verdict, "stale": stale, "malformed": malformed, "early": early, "held": held}
 
 
-def decide(tier: dict, head_sha: str, comments: list[dict], head_committed_at: str | None = None, standard: str | None = None) -> tuple[str, str]:
-    """(state, description) of the commit status."""
+def decide(tier: dict, head_sha: str, comments: list[dict], head_committed_at: str | None = None, standard: str | None = None,
+           automatic: dict | None = None) -> tuple[str, str]:
+    """(state, description) of the commit status. `automatic` is the review station's automatic reviewer, if any."""
     short = head_sha[:7]
     level = tier["review"]
     if level == risk.NONE:
         return "success", "No code changed: no independent review needed"
     areas = ", ".join(tier["areas"]) if level == risk.HIGH else CODE_CHANGE
-    record = latest_record(comments, head_sha, head_committed_at)
+    record = latest_record(comments, head_sha, head_committed_at, bool(automatic) and level in automatic["passes"])
     if record["verdict"] == PASS:
         return "success", _fit(f"Review record for {short} says pass (a process control, not proof)", areas)
     if record["verdict"] == FINDINGS:
         return "failure", _fit(f"Review of {short} has open findings: fix or answer them, then review again", areas)
+    if record["held"]:
+        return "failure", _fit(f"Automatic review passed {short}; this change also needs a person's review", areas)
     if record["early"]:
         return "failure", _fit(f"The review record is older than commit {short}: review again", areas)
     if record["stale"]:
@@ -159,8 +220,8 @@ def summary(tier: dict, state: str, description: str, head_sha: str, standard: s
 
 # ── GitHub API ─────────────────────────────────────────────────────────────────────────────────────────────────────
 class GitHub:
-    def __init__(self, repo: str, token: str):
-        self.repo, self.token = repo, token
+    def __init__(self, repo: str, token: str, reviewer_key: str = ""):
+        self.repo, self.token, self.reviewer_key = repo, token, reviewer_key
 
     def _request(self, method: str, path: str, body: dict | None = None, accept: str = "application/vnd.github+json") -> bytes:
         req = urllib.request.Request(
@@ -218,8 +279,13 @@ def load_config(gh, default_branch: str) -> dict:
     return config.parse(text)
 
 
-def trust_writers(gh, comments: list[dict]) -> list[dict]:
-    """Sets the association of every comment that carries (or attempts) a review marker from what the account may
+def trust_writers(gh, comments: list[dict], automatic: dict | None = None, proven=None) -> list[dict]:
+    """Marks a record from the factory file's automatic reviewer (`automatic`, or None) as AUTOMATIC when three
+    things hold: the comment's login is that account, GitHub says the account is a bot, and `proven(comment)` is
+    true (the record carries the reviewer's proof; see AUTOMATIC above). With no `proven` nothing is marked. A
+    comment from that account that fails any of these is judged like any other account's, and so does not count.
+
+    Sets the association of every comment that carries (or attempts) a review marker from what the account may
     actually do: COLLABORATOR when it can write to the repository, otherwise untrusted. The permission is asked for
     once per account. An OWNER is not looked up.
 
@@ -229,8 +295,13 @@ def trust_writers(gh, comments: list[dict]) -> list[dict]:
     cache: dict[str, bool] = {}
     out = []
     for c in comments:
-        if c.get("author_association") != "OWNER" and (parse_marker(c.get("body")) or is_malformed_marker(c.get("body"))):
-            login = ((c.get("user") or {}).get("login") or "").strip()
+        marked = parse_marker(c.get("body")) or is_malformed_marker(c.get("body"))
+        user = c.get("user") or {}
+        if (marked and automatic and proven and user.get("login") == automatic["account"] and user.get("type") == "Bot"
+                and proven(c)):
+            c = {**c, "author_association": AUTOMATIC}
+        elif c.get("author_association") != "OWNER" and marked:
+            login = (user.get("login") or "").strip()
             if login and login not in cache:
                 try:
                     answer = gh.get(f"collaborators/{urllib.parse.quote(login, safe='')}/permission")
@@ -252,7 +323,7 @@ def evaluate_one(gh: GitHub, pr: dict, cfg: dict) -> dict:
         tier = {"review": risk.NONE, "files": 0, "areas": [], "reasons": [], "code": []}
         return {**base, "tier": tier, "state": "success",
                 "description": f"{config.FILE} has no independent-review station: nothing to check"}
-    standard = cfg["review"].get("standard")
+    standard, automatic = cfg["review"].get("standard"), cfg["review"].get("automatic")
     files = gh.pages(f"pulls/{number}/files", MAX_FILES)
     tier = risk.classify(files, cfg)
     if len(files) >= MAX_FILES:
@@ -262,9 +333,11 @@ def evaluate_one(gh: GitHub, pr: dict, cfg: dict) -> dict:
         tier["areas"] = sorted(set(tier["areas"]) | {"unreadable diff"})
     comments, committed_at = [], None
     if tier["review"] != risk.NONE:
-        comments = trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000))
+        key, repo = getattr(gh, "reviewer_key", ""), getattr(gh, "repo", "")
+        proven = (lambda c: is_proven(key, repo, number, c.get("body"))) if automatic else None
+        comments = trust_writers(gh, gh.pages(f"issues/{number}/comments", 10_000), automatic, proven)
         committed_at = gh.get(f"commits/{head_sha}")["commit"]["committer"]["date"]
-    state, description = decide(tier, head_sha, comments, committed_at, standard)
+    state, description = decide(tier, head_sha, comments, committed_at, standard, automatic)
     return {**base, "tier": tier, "state": state, "description": description, "standard": standard}
 
 
@@ -353,7 +426,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--context", default=CONTEXT, help="name of the status to set (default: %(default)s)")
     ap.add_argument("--dry-run", action="store_true", help="print the decision; set nothing")
     args = ap.parse_args(argv)
-    gh = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"])
+    gh = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"], os.environ.get("FACTORY_REVIEWER_KEY", ""))
     # Settle the pull request's head commit. If the pull request has a new head commit by the time that is done,
     # settle that one as well. The commit it left was settled for whichever pull requests stayed on it.
     code, settled = 0, []

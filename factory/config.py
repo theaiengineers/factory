@@ -4,11 +4,15 @@ Only the parts that code in this package reads are checked. Keys the engine does
 """
 from __future__ import annotations
 
+import re
+
 import yaml
 
 FILE = "factory.yml"
 SPEC_PREFIX = "factory/0."
 REVIEW = "independent-review"
+BOT_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\[bot\]")
+AUTOMATIC_LEVELS = ("code", "high")      # the levels an automatic reviewer's pass can be allowed to count for
 
 
 class ConfigError(ValueError):
@@ -21,6 +25,27 @@ def _strings(value, where: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) and v for v in value):
         raise ConfigError(f"{where} must be a list of paths")
     return value
+
+
+def _automatic(value, where: str) -> dict | None:
+    """The review station's `automatic` reviewer: {"account", "passes"}, or None when there is none.
+
+    The account must be a bot's login (it ends `[bot]`). The gate takes a record from this account at its word, with
+    no permission lookup, so naming a person here would let that person's records count whatever they may do."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ConfigError(f"{where}.automatic must be a mapping with `account`")
+    unknown = sorted((k for k in value if k not in ("account", "passes")), key=str)
+    if unknown:
+        raise ConfigError(f"{where}.automatic has a key it does not know: {unknown[0]}")
+    account = value.get("account")
+    if not isinstance(account, str) or not BOT_LOGIN.fullmatch(account):
+        raise ConfigError(f"{where}.automatic.account must be a bot's login, such as github-actions[bot]")
+    passes = value.get("passes", ["code"])
+    if not isinstance(passes, list) or "code" not in passes or not all(p in AUTOMATIC_LEVELS for p in passes):
+        raise ConfigError(f"{where}.automatic.passes must list code, or code and high")
+    return {"account": account, "passes": list(dict.fromkeys(passes))}
 
 
 def parse(text: str) -> dict:
@@ -45,7 +70,8 @@ def parse(text: str) -> dict:
             if review is not None:
                 raise ConfigError(f"intake has more than one {REVIEW} station")
             review = {"station": station["station"], "standard": station.get("standard"),
-                      "skip_when_only": _strings(station.get("skip_when_only"), f"{station['station']}.skip_when_only")}
+                      "skip_when_only": _strings(station.get("skip_when_only"), f"{station['station']}.skip_when_only"),
+                      "automatic": _automatic(station.get("automatic"), station["station"])}
 
     risk = []
     areas = raw["risk"] if raw.get("risk") is not None else []

@@ -44,6 +44,12 @@ on:
         description: The version of the factory to run. Use the same ref as in `uses:`.
         type: string
         default: main
+    secrets:
+      reviewer_key:
+        description: >-
+          Only for the automatic reviewer (docs/AUTOMATIC_REVIEWER.md). The key its records are signed with. The gate
+          counts a record from the workflow account only when it carries a proof made with this key.
+        required: false
 
 permissions:
   statuses: write
@@ -74,4 +80,5 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
           CONTEXT: ${{ inputs.context }}
+          FACTORY_REVIEWER_KEY: ${{ secrets.reviewer_key }}
         run: python3 -m factory.review_gate --pr "$PR_NUMBER" --context "$CONTEXT"
