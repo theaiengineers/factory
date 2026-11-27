@@ -145,7 +145,7 @@ class OneChange(unittest.TestCase):
                            {"id": 9, "created_at": "2026-01-15T12:20:00Z", "user": {"login": "alice"}, "body": "thanks"}]})
         found = export(gh, numbers=[12])
         self.assertEqual(told(found), [
-            ("change.opened", None, None, "a"), ("station.entered", "testing", None, "a"), ("station.entered", "qa", None, "a"),
+            ("change.opened", None, None, ""), ("station.entered", "testing", None, "a"), ("station.entered", "qa", None, "a"),
             ("station.finished", "testing", "pass", "a"), ("station.finished", "qa", "sent_back", "a"),
             ("change.updated", None, None, "b"), ("station.entered", "testing", None, "b"), ("station.entered", "qa", None, "b"),
             ("station.finished", "testing", "pass", "b"), ("station.finished", "qa", "pass", "b"), ("change.merged", None, None, "b")])
@@ -158,7 +158,7 @@ class OneChange(unittest.TestCase):
         first = found[0]
         self.assertEqual((first["spec"], first["factory"], first["building"], first["line"], first["recorded"], first["time"]),
                          ("factory.event/0.1", "example", "example/shop", None, RECORDED, "2026-01-15T12:05:07Z"))
-        self.assertEqual(first["data"]["factory"], {"title": "Add a thing", "base": "main"})
+        self.assertNotIn("data", first)
 
     def test_exporting_twice_gives_the_same_ids(self):
         def gh():
@@ -196,6 +196,27 @@ class OneChange(unittest.TestCase):
                          ("station.finished", "pass", {"kind": "person", "id": "mallory"}, "review.status_unrecognised",
                           {"factory": {"unrecognised_status": True}}))
 
+    def test_two_stations_deciding_in_the_same_second_are_both_kept(self):
+        at = "2026-01-15T12:06:00Z"
+        gh = FakeGitHub([pull()], runs={A: [run("tests", at, at), run("lint", at, at, ident=2)]},
+                        statuses={A: [status(at, "failure", f"No independent review recorded for {A[:7]}"),
+                                      status(at, "failure", f"Review of {A[:7]} has open findings: fix", ident=2),
+                                      status(at, "success", f"Review record for {A[:7]} says pass", ident=3)]})
+        found = [e for e in export(gh, numbers=[12]) if e["time"] == at]
+        self.assertEqual(sorted((e["type"], e["station"], e.get("outcome")) for e in found),
+                         sorted([("station.entered", "testing", None), ("station.finished", "testing", "pass"), ("station.entered", "qa", None),
+                                 ("station.finished", "qa", "sent_back"), ("station.finished", "qa", "pass")]))
+        self.assertEqual(len({e["id"] for e in found}), 5)
+        self.assertEqual([e.get("outcome") for e in found if e["station"] == "qa" and e["type"] == "station.finished"], ["sent_back", "pass"])
+
+    def test_unknown_words_that_fail_and_then_succeed_are_two_events(self):
+        gh = FakeGitHub([pull()], statuses={A: [status("2026-01-15T12:06:00Z", "failure", "Hold on"), status("2026-01-15T12:06:30Z", "pending", "Still", ident=2),
+                                                status("2026-01-15T12:07:00Z", "success", "Go", ident=3), status("2026-01-15T12:08:00Z", "success", "Go again", ident=4)]})
+        qa = [e for e in export(gh, numbers=[12]) if e.get("station") == "qa"]
+        self.assertEqual([(e["type"], e.get("outcome")) for e in qa],
+                         [("station.entered", None), ("station.entered", None), ("station.finished", "pass")])
+        self.assertTrue(all(e["data"]["factory"]["unrecognised_status"] for e in qa))
+
     def test_an_error_and_another_context(self):
         gh = FakeGitHub([pull()], statuses={A: [status("2026-01-15T12:06:00Z", "error", "Gate could not decide: boom"),
                                                 status("2026-01-15T12:07:00Z", "success", "Review record for x says pass", context="other", ident=2)]})
@@ -230,11 +251,28 @@ class Testing(unittest.TestCase):
         self.assertEqual([e["type"] for e in self.station([run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z")])], ["station.entered"])
         self.assertEqual(self.station([run("unrelated", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z")]), [])
 
-    def test_a_rerun_replaces_the_run_it_repeats(self):
-        _, finished = self.station([run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"),
-                                    run("tests", "2026-01-15T12:10:00Z", "2026-01-15T12:11:00Z", ident=5),
+    FIRST = [run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"),
+             run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)]
+
+    def test_a_rerun_is_a_second_entry_and_finish_and_the_first_stays(self):
+        before = self.station(self.FIRST)
+        after = self.station(self.FIRST + [run("tests", "2026-01-15T12:10:00Z", "2026-01-15T12:11:00Z", ident=5)])
+        self.assertEqual([(e["type"], e.get("outcome"), e["time"]) for e in after],
+                         [("station.entered", None, "2026-01-15T12:05:10Z"), ("station.finished", "failed", "2026-01-15T12:06:00Z"),
+                          ("station.entered", None, "2026-01-15T12:10:00Z"), ("station.finished", "pass", "2026-01-15T12:11:00Z")])
+        self.assertEqual(after[:2], before)                                 # the earlier export's events, unchanged
+        running = self.station(self.FIRST + [run("tests", "2026-01-15T12:10:00Z", ident=5)])
+        self.assertEqual([e["type"] for e in running], ["station.entered", "station.finished", "station.entered"])
+
+    def test_earlier_attempts_are_asked_for(self):
+        gh = FakeGitHub([pull()], runs={A: self.FIRST})
+        export(gh, numbers=[12])
+        self.assertTrue([p for p in gh.asked if "/check-runs?filter=all" in p])
+
+    def test_a_cancelled_check_is_not_a_pass(self):
+        _, finished = self.station([run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="cancelled"),
                                     run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)])
-        self.assertEqual((finished["outcome"], finished["time"]), ("pass", "2026-01-15T12:11:00Z"))
+        self.assertEqual((finished["outcome"], finished["reason"]["text"]), ("failed", "A required check did not pass"))
 
     def test_no_required_checks_no_testing_events(self):
         rules = RULES.replace("    require: [tests, lint]\n", "")
@@ -261,11 +299,13 @@ class Listing(unittest.TestCase):
         self.assertEqual((found[0]["factory"], found[0]["building"]), ("example", "example/shop"))
         self.assertFalse([p for p in gh.asked if "comments" in p or "statuses" in p])
 
-    def test_a_title_is_one_bounded_line(self):
-        found = export(FakeGitHub([pull(title="a\nb " + "x" * 500)]), numbers=[12])
-        title = found[0]["data"]["factory"]["title"]
-        self.assertTrue(title.startswith("a b x"))
-        self.assertEqual(len(title), events.TITLE_LIMIT)
+    def test_nothing_that_can_be_edited_later_is_in_the_record(self):
+        # A new title, a new base branch and a force-push all leave the opening event exactly as it was.
+        before = export(FakeGitHub([pull(title="First title")]), numbers=[12])
+        after = export(FakeGitHub([pull(title="Second title", base="main", head=B)], commits={12: [commit(B, "2026-01-15T11:00:00Z")]}), numbers=[12])
+        self.assertEqual([e for e in before if e["type"] == "change.opened"], [e for e in after if e["type"] == "change.opened"])
+        self.assertNotIn("title", json.dumps(before))
+        self.assertEqual(events.check_lines(json.dumps(e) for e in before + after)[1], [])
 
 
 GOOD = {"spec": "factory.event/0.1", "id": "x1", "time": "2026-01-15T12:16:00Z", "factory": "example", "building": "example/shop",
@@ -278,6 +318,11 @@ class Check(unittest.TestCase):
         self.assertEqual(events.problems({**GOOD, "something_new": 1, "data": {"acme.scan": {}}, "time": "2026-01-15T12:16:00.123Z"}), [])
         shipment = {**{k: v for k, v in GOOD.items() if k not in ("change", "station", "outcome")}, "type": "shipment.landed", "line": "api", "shipment": "a-97"}
         self.assertEqual(events.problems(shipment), [])
+        # The spec's own example: a station on a line, about a shipment and no one change.
+        on_a_line = {**{k: v for k, v in GOOD.items() if k != "change"}, "line": "api", "station": "evaluate"}
+        self.assertEqual(events.problems(on_a_line), [])
+        self.assertEqual(events.problems({**GOOD, "type": "action.needed", "outcome": None, "reason": {"code": "x"}, "assignees": []} | {"outcome": "pass"})[:1],
+                         ["`outcome` belongs only on station.finished"])
 
     def test_what_is_wrong_is_said(self):
         cases = (({**GOOD, "type": "station.exploded"}, "`type`"), ({**GOOD, "outcome": "fine"}, "`outcome`"),
@@ -287,7 +332,14 @@ class Check(unittest.TestCase):
                  ({**GOOD, "outcome": "sent_back"}, "`reason.code`"), ({**GOOD, "type": "station.entered"}, "`outcome` belongs"),
                  ({**GOOD, "actor": {"kind": "robot"}}, "`actor.kind`"), ({**GOOD, "data": []}, "`data`"),
                  ({**GOOD, "recorded": "yesterday"}, "`recorded`"), ({**GOOD, "type": "action.needed"}, "`reason.code`"),
-                 ({**GOOD, "type": "shipment.landed"}, "`shipment`"), ([GOOD], "JSON object"), ("x", "JSON object"))
+                 ({**GOOD, "type": "shipment.landed"}, "`shipment`"), ([GOOD], "JSON object"), ("x", "JSON object"),
+                 ({**GOOD, "time": "2026-99-99T99:99:99Z"}, "`time`"), ({**GOOD, "time": "２０２６-01-15T12:16:00Z"}, "`time`"),
+                 ({**GOOD, "spec": "factory.event/"}, "`spec`"), ({**GOOD, "change": {"number": -1}}, "`change.number`"),
+                 ({**GOOD, "change": {"number": 1, "commit": 7}}, "`change.commit`"),
+                 ({**GOOD, "type": "action.needed", "reason": {"code": "x"}}, "`assignees`"),
+                 ({k: v for k, v in GOOD.items() if k != "change"}, "`change.number`"),
+                 ({**GOOD, "type": "change.sorted"}, "`lines`"),
+                 ({**GOOD, "type": "shipment.held", "line": "api", "reason": {"code": "x"}}, "`carries`"))
         for event, word in cases:
             self.assertTrue(any(word in p for p in events.problems(event)), (event, events.problems(event)))
 
@@ -330,6 +382,17 @@ class Main(unittest.TestCase):
             code, out, err = self.run_main(["export"], self.gh(rules))
             self.assertEqual((code, out), (2, ""))
             self.assertIn(word, err)
+
+    def test_plain_failures_are_said_plainly(self):
+        gh = self.gh()
+        gh.get = mock.Mock(side_effect=urllib.error.HTTPError("u", 404, "no", {}, io.BytesIO(b"")))
+        code, out, err = self.run_main(["export", "--pr", "999"], gh)
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("no such pull request", err)
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, {}, clear=True), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            self.assertEqual(events.main(["export"]), 2)
+        self.assertIn("GITHUB_TOKEN", err.getvalue())
 
     def test_a_since_that_is_not_a_time_is_refused(self):
         code, _, err = self.run_main(["export", "--since", "last week"], self.gh())

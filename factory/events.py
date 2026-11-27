@@ -9,12 +9,16 @@ gate set are already a dated, append-only history; `export` reads it and writes 
 the record can be made again at any time, covers the time before it was first asked for, and needs no secret beyond a
 token that can read the repository.
 
-Every event's `id` is worked out from what it describes, so exporting twice gives the same ids and a reader that has
-seen an event keeps one copy (the spec's "repeats are harmless").
+Every event's `id` is worked out from the thing it describes (which pull request, commit, station, moment and
+outcome), and an event carries nothing that can be edited afterwards, such as a title. So exporting twice gives the
+same events with the same ids, and a reader that keeps one event for each id can be fed overlapping exports (the
+spec's "repeats are harmless"). A later export can hold fewer events than an earlier one (see force-pushes below),
+never different ones under an id already used.
 
-What it cannot see, because GitHub does not keep it:
+What it cannot see, because GitHub does not keep it or the gate never said it:
   - when a commit was pushed. `change.updated` carries the commit's own date, which the author's machine set;
   - commits that a force-push removed from a pull request, and whatever was decided about them;
+  - a review of a commit that was no longer the head when the gate next ran: the gate set no status for it;
   - who an account is. A person's login may be driven by an agent.
 What the review station decided is read from the statuses the gate set. A status is not signed: anyone who can write to
 the repository can set one under the gate's name, and it will be read as the gate's.
@@ -41,9 +45,20 @@ TYPES = ("change.opened", "change.updated", "change.closed", "station.entered", 
          "action.needed", "action.cleared")
 OUTCOMES = ("pass", "sent_back", "failed", "held", "skipped", "error")
 ACTOR_KINDS = ("agent", "person", "system")
-TIME = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\Z")
+TIME = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z\Z")
+
+
+def is_time(text) -> bool:
+    """A real UTC moment written as the spec asks."""
+    if not isinstance(text, str) or not TIME.match(text):
+        return False
+    try:
+        datetime.datetime.strptime(text[:19], "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return True
 MAX_COMMITS = 250                # GitHub lists at most this many commits of a pull request
-TITLE_LIMIT = 200
+MAX_RUN_PAGES = 10               # check runs read for one commit, a hundred to a page
 ORDER = {t: i for i, t in enumerate(("change.opened", "change.updated", "station.entered", "action.needed",
                                      "action.cleared", "station.finished", "change.merged", "change.closed"))}
 
@@ -96,34 +111,58 @@ class Writer:
         if not time:
             return
         change = {"number": number, **({"commit": commit} if commit else {})}
-        event = {**self.base, "id": event_id(self.base["building"], number, type_, commit or "", time, *key),
+        # Everything that tells two events apart goes into the id: two stations can decide in the same second.
+        event = {**self.base, "id": event_id(self.base["building"], number, type_, commit or "", time,
+                                             more.get("station") or "", more.get("outcome") or "", *key),
                  "time": time, "recorded": self.recorded, "change": change, "type": type_}
         event.update({k: v for k, v in more.items() if v is not None})
         self.events.append(event)
 
 
+def check_runs(gh, sha: str) -> list[dict]:
+    """Every check run on the commit, earlier attempts included (GitHub's default leaves those out, and then a re-run
+    would rewrite what an earlier export said)."""
+    runs = []
+    for page in range(1, MAX_RUN_PAGES + 1):
+        batch = gh.get(f"commits/{sha}/check-runs?filter=all&per_page=100&page={page}").get("check_runs") or []
+        runs += batch
+        if len(batch) < 100:
+            break
+    return runs
+
+
 def testing_events(out: Writer, gh, number: int, sha: str, station: str, names: list[str]) -> None:
-    """One `station.entered` and, when every required check has finished, one `station.finished` for the commit."""
+    """The checks station's events for one commit, replayed in order of time from its check runs.
+
+    `station.entered` when a required check starts while the station is idle; `station.finished` each time every
+    required check has reported and none is still running. A re-run after a failure is therefore a second entry and
+    a second finish, and the first stays in the record."""
     if not names:
         return
-    runs = [r for r in (gh.get(f"commits/{sha}/check-runs?per_page=100").get("check_runs") or []) if r.get("name") in names]
-    if not runs:
-        return
-    newest: dict = {}
-    for r in sorted(runs, key=lambda r: (r.get("started_at") or "", r.get("id") or 0)):
-        newest[(r.get("name"), (r.get("check_suite") or {}).get("id"))] = r
-    standing = list(newest.values())
-    started = min((r.get("started_at") for r in standing if r.get("started_at")), default=None)
-    out.add("station.entered", started, number, sha, station=station, actor={"kind": "system", "id": "checks"})
-    reported = {r.get("name") for r in standing}
-    if reported != set(names) or any(r.get("status") != "completed" or not r.get("completed_at") for r in standing):
-        return
-    failed = sorted({r["name"] for r in standing if r.get("conclusion") not in reviewer.PASSED_CONCLUSIONS})
-    finished = max(r["completed_at"] for r in standing)
-    out.add("station.finished", finished, number, sha, station=station, outcome="failed" if failed else "pass",
-            actor={"kind": "system", "id": "checks"}, evidence=next((r.get("html_url") for r in standing if r.get("html_url")), None),
-            reason={"code": "checks.failed", "text": "A required check failed"} if failed else None,
-            data={"factory": {"checks": sorted(names), **({"failed": failed} if failed else {})}})
+    runs = [r for r in check_runs(gh, sha) if r.get("name") in names and r.get("started_at")]
+    moments = [(r["started_at"], 0, r.get("id") or 0, r) for r in runs]
+    moments += [(r["completed_at"], 1, r.get("id") or 0, r) for r in runs if r.get("status") == "completed" and r.get("completed_at")]
+    checks, standing, busy = {"kind": "system", "id": "checks"}, {}, False
+    for when, finished, _, r in sorted(moments, key=lambda m: m[:3]):
+        key = (r.get("name"), (r.get("check_suite") or {}).get("id"))
+        if not finished:
+            standing[key] = r
+            if not busy:
+                busy = True
+                out.add("station.entered", when, number, sha, station=station, actor=checks)
+            continue
+        if standing.get(key) is not r:
+            continue                 # an attempt that a later one has already replaced
+        current = list(standing.values())
+        done = all(c.get("status") == "completed" and c.get("completed_at") and c["completed_at"] <= when for c in current)
+        if not busy or not done or {c.get("name") for c in current} != set(names):
+            continue
+        busy = False
+        failed = sorted({c["name"] for c in current if c.get("conclusion") not in reviewer.PASSED_CONCLUSIONS})
+        out.add("station.finished", when, number, sha, station=station, outcome="failed" if failed else "pass", actor=checks,
+                evidence=r.get("html_url"),
+                reason={"code": "checks.failed", "text": "A required check did not pass"} if failed else None,
+                data={"factory": {"checks": sorted(names), **({"failed": failed} if failed else {})}})
 
 
 def review_events(out: Writer, gh, number: int, sha: str, station: str, context: str, records: list[dict], automatic) -> None:
@@ -133,9 +172,12 @@ def review_events(out: Writer, gh, number: int, sha: str, station: str, context:
     last, waiting_for_person = None, False
     for s in sorted(statuses, key=lambda s: (s["created_at"], s.get("id") or 0)):
         kind, code, text = decision(s.get("state") or "", s.get("description"))
-        if kind == last:
+        # Words that are not the gate's are only "the same thing" when the state is the same too: a failure and then
+        # a success in unknown words are two events, and the second is the one that lets the pull request merge.
+        said = (kind, s.get("state") if kind == UNKNOWN else None)
+        if said == last:
             continue
-        last, when, link = kind, s["created_at"], s.get("target_url")
+        last, when, link = said, s["created_at"], s.get("target_url")
         gate = {"kind": "system", "id": "review gate"}
         if waiting_for_person and kind != PERSON:
             out.add("action.cleared", when, number, sha, station=station, key=("person",), actor=gate, evidence=link)
@@ -177,12 +219,11 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
               for s in cfg["raw"].get("intake") or [] if isinstance(s, dict) and s.get("uses") == "checks" and s.get("station")]
     commits = gh.pages(f"pulls/{number}/commits", MAX_COMMITS)
     dated = [(c["sha"], ((c.get("commit") or {}).get("committer") or {}).get("date")) for c in commits if c.get("sha")]
-    before = [sha for sha, date in dated if date and opened and date <= opened]
-    title = " ".join(str(pr.get("title") or "").split())[:TITLE_LIMIT]
-    out.add("change.opened", opened, number, before[-1] if before else None, actor=actor_of(pr.get("user")),
-            evidence=pr.get("html_url"), data={"factory": {"title": title, "base": (pr.get("base") or {}).get("ref")}})
+    # Nothing that can be edited later (the title, the base branch) and nothing GitHub does not keep (which commit
+    # was the head at that moment) goes on this event, so it is the same in every export.
+    out.add("change.opened", opened, number, actor=actor_of(pr.get("user")), evidence=pr.get("html_url"))
     for sha, date in dated:
-        if sha not in before:
+        if date and opened and date > opened:
             out.add("change.updated", date, number, sha, data={"factory": {"time_is": "the commit's own date, not when it was pushed"}})
     records = []
     if review_station:
@@ -228,8 +269,13 @@ def export(gh, cfg: dict, numbers: list[int] | None = None, limit: int = 30, sin
         prs = [gh.get(f"pulls/{p['number']}") if p.get("merged_at") else p for p in prs[:limit]]
     for pr in prs:
         pull_request_events(out, gh, pr, cfg, context)
-    unique = {e["id"]: e for e in out.events}
-    return sorted(unique.values(), key=lambda e: (e["time"], e["change"]["number"], ORDER.get(e["type"], 99), e["id"]))
+    # Events of one moment keep the order they were worked out in (the gate's statuses in the order it set them),
+    # so a send-back and a pass in the same second come out in the order they happened.
+    unique: dict = {}
+    for place, e in enumerate(out.events):
+        unique.setdefault(e["id"], (place, e))
+    ordered = sorted(unique.values(), key=lambda pe: (pe[1]["time"], pe[1]["change"]["number"], ORDER.get(pe[1]["type"], 99), pe[0]))
+    return [e for _, e in ordered]
 
 
 # ── checking an event ──────────────────────────────────────────────────────────────────────────────────────────────
@@ -239,29 +285,38 @@ def problems(event) -> list[str]:
         return ["an event must be a JSON object"]
     found = []
     spec = event.get("spec")
-    if not isinstance(spec, str) or not spec.startswith("factory.event/"):
+    if not isinstance(spec, str) or not re.fullmatch(r"factory\.event/[0-9]+\.[0-9]+", spec):
         found.append("`spec` must be factory.event/ and a version")
     for name in ("id", "factory", "building"):
         if not isinstance(event.get(name), str) or not event[name]:
             found.append(f"`{name}` is required and must be text")
     for name in ("time", "recorded"):
         if name in event or name == "time":
-            if not isinstance(event.get(name), str) or not TIME.match(event[name]):
+            if not is_time(event.get(name)):
                 found.append(f"`{name}` must be a UTC time such as 2026-01-15T12:16:00Z")
     type_ = event.get("type")
     if type_ not in TYPES:
         return found + ["`type` is not one the spec lists"]
-    if type_.startswith(("change.", "station.")):
-        change = event.get("change")
-        if not isinstance(change, dict) or not isinstance(change.get("number"), int) or isinstance(change.get("number"), bool):
-            found.append("`change.number` is required for a change or station event")
+    change, on_a_line = event.get("change"), isinstance(event.get("line"), str) and bool(event.get("line"))
+    if change is not None or type_.startswith("change.") or (type_.startswith("station.") and not on_a_line):
+        number = change.get("number") if isinstance(change, dict) else None
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            found.append("`change.number` is required for a change event, and for a station event that is not on a line")
+        elif "commit" in change and (not isinstance(change["commit"], str) or not change["commit"]):
+            found.append("`change.commit` must be text")
+    if type_ == "change.sorted" and not (isinstance(event.get("lines"), list) and all(isinstance(i, str) for i in event["lines"])):
+        found.append("`lines` is required on change.sorted and must be a list of line ids")
     if type_.startswith("station.") and (not isinstance(event.get("station"), str) or not event["station"]):
         found.append("`station` is required for a station event")
     if type_.startswith("shipment."):
         if type_ != "shipment.held" and not event.get("shipment"):
             found.append("`shipment` is required for a shipment event")
-        if not isinstance(event.get("line"), str) or not event["line"]:
+        if not on_a_line:
             found.append("`line` is required for a shipment event")
+        if type_ in ("shipment.held", "shipment.started") and not isinstance(event.get("carries"), list):
+            found.append("`carries` is required on shipment.held and shipment.started")
+    if type_ == "action.needed" and not isinstance(event.get("assignees"), list):
+        found.append("`assignees` is required on action.needed (it may be empty)")
     if type_ == "station.finished":
         if event.get("outcome") not in OUTCOMES:
             found.append("`outcome` on station.finished must be one the spec lists")
@@ -311,13 +366,20 @@ def main(argv: list[str] | None = None) -> int:
     steps.add_parser("check", help="read events on standard input and say what is wrong with them")
     args = parser.parse_args(argv)
     if args.step == "check":
-        count, said = check_lines(sys.stdin)
+        try:
+            count, said = check_lines(sys.stdin)
+        except UnicodeDecodeError:
+            print("The input is not UTF-8 text.")
+            return 1
         for line in said:
             print(line)
         print(f"{count} event(s), {len(said)} problem(s).")
         return 1 if said else 0
     if args.since and not TIME.match(args.since):
         print("--since must be a UTC time such as 2026-01-15T00:00:00Z", file=sys.stderr)
+        return 2
+    if not os.environ.get("GITHUB_REPOSITORY") or not os.environ.get("GITHUB_TOKEN"):
+        print("Set GITHUB_REPOSITORY (OWNER/REPO) and GITHUB_TOKEN (a token that can read it).", file=sys.stderr)
         return 2
     gh = review_gate.GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_TOKEN"])
     try:
@@ -330,7 +392,14 @@ def main(argv: list[str] | None = None) -> int:
     except config.ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
-    for event in export(gh, cfg, args.pr, max(1, args.limit), args.since, args.context):
+    try:
+        found = export(gh, cfg, args.pr, max(1, args.limit), args.since, args.context)
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise
+        print("GitHub has no such pull request, or the token cannot read it.", file=sys.stderr)
+        return 2
+    for event in found:
         sys.stdout.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
     return 0
 

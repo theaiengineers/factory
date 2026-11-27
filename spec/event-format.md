@@ -43,7 +43,7 @@ A factory writes one event for each thing that happens to a change or a shipment
 | `recorded` | no | When the event was written. Differs from `time` for backfilled history |
 | `factory`, `building` | yes | |
 | `line` | for line events | The line's `id` from the factory file. `null` before the sorter |
-| `change` | for change and station events | `number` is required. `commit` is the head commit the event is about |
+| `change` | for change events, and for station events before the sorter | `number` is required. `commit` is the head commit the event is about. A station event on a line is about a shipment and may carry no `change` |
 | `shipment` | for shipment events | An id for the release, unique within the line |
 | `carries` | for shipment events | The change numbers the shipment contains |
 | `station` | for station events | The station's name from the factory file |
@@ -72,7 +72,7 @@ A factory writes one event for each thing that happens to a change or a shipment
 | `action.needed` | A person must act before anything moves | `assignees` (may be empty when nobody is named), `reason`; `change` and `station` when it is about one change at one station |
 | `action.cleared` | They did, or it no longer applies | The same `change` and `station` as the `action.needed` it answers |
 
-`python3 -m factory.events check` reads events and says which of them break the rules on this page.
+`python3 -m factory.events check` reads events and says which of them lack a required field or use a type or outcome that is not listed here.
 
 ## Outcomes
 
@@ -104,5 +104,5 @@ Fields that repeat are left out to keep the example readable.
 
 - **Orders across buildings.** A piece of work can need changes in two repositories. There is no field yet that links them.
 - **Identity.** `actor` assumes the agent that wrote a change can be told apart from the agent that reviewed it.
-- **Transport.** This spec defines the event, not how it is delivered or stored. For the stations before a merge, the factory writes events out from what GitHub already holds, on request ([the record of every step](../docs/EVENTS.md)); nothing sends them anywhere yet.
+- **Transport.** This spec defines the event, not how it is delivered or stored. For the stations before a merge, the factory writes events out from what GitHub already holds, on request ([the record of every step](../docs/EVENTS.md)); nothing sends them anywhere yet. That writer records what the gate decided, so a review the gate never ruled on (its commit had already been replaced) is not in its output, although a send-back is meant to be recorded every time.
 - **Pairing.** A `station.finished` is not always preceded by a `station.entered` for the same station and commit, and a reader must not rely on one.
