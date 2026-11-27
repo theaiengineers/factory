@@ -74,8 +74,9 @@ def parse(text: str) -> dict:
     except yaml.YAMLError as e:
         raise ConfigError(f"{FILE} is not valid YAML: {str(e).splitlines()[0]}") from e
     except ValueError as e:
-        # PyYAML reads an unquoted value shaped like a date as one, and lets the error out when it is not a real day.
-        raise ConfigError(f"{FILE} is not valid YAML: it has a date that is not a real day ({e})") from e
+        # PyYAML lets a plain ValueError out for a value it cannot build: an unquoted value shaped like a date that
+        # is not a real day, or a number too long to convert.
+        raise ConfigError(f"{FILE} is not valid YAML: it has a value that cannot be read ({str(e).splitlines()[0][:120]})") from e
     if not isinstance(raw, dict):
         raise ConfigError(f"{FILE} must be a mapping")
     if not str(raw.get("spec", "")).startswith(SPEC_PREFIX):

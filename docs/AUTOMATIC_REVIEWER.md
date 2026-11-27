@@ -132,8 +132,9 @@ A subscription token lasts a year. A key can be withdrawn, and a subscription ca
 | The credential is refused | Opens an issue, and the run fails |
 | No credential is set, though the factory file names an automatic reviewer | Opens an issue, and the run fails |
 | No answer after two tries, and the credential was not refused | Opens an issue saying so, and the run fails. This may be a passing fault |
+| The factory file cannot be used | Opens an issue saying so, makes no model call, and the run fails |
 
-It opens one issue for each kind of problem and does not open another while that one is open. Only an issue opened by the workflow account counts as "already open", so no person and no other app can silence a warning by opening a look-alike. If the check itself cannot finish (or the factory file cannot be read), that is reported as "could not reach its model", and nothing is closed on the strength of it. If `automatic` is removed from the factory file, the check closes its open issues and goes quiet. Every word of an issue is fixed in the code. A failed scheduled run is also emailed by GitHub to whoever last changed the schedule.
+It opens one issue for each kind of problem and does not open another while that one is open. Only an issue opened by the workflow account counts as "already open", so no person and no other app can silence a warning by opening a look-alike. If the check itself cannot finish, that is reported as "could not reach its model". In that case, and when the factory file cannot be used, the check has learnt nothing about the file, so it closes nothing. If `automatic` is removed from the factory file, the check closes its open issues and goes quiet. Every word of an issue is fixed in the code. A failed scheduled run is also emailed by GitHub to whoever last changed the schedule.
 
 This tells you the credential has stopped, within one schedule interval. It cannot tell you in advance: a token does not say when it expires, and a workflow cannot read a secret's age.
 

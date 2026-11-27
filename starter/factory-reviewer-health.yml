@@ -7,6 +7,7 @@
 # 40-character commit id of the factory version you are adopting: v0.4.0 or later. Use the same one as your gate.
 #
 # Pass the same model secret your reviewer workflow uses. Keep the line below that matches and delete the other.
+# If your reviewer workflow sets `model`, set the same `model` under `with:` here, so the check asks the same one.
 #
 # Issues must be switched on for the repository. GitHub stops scheduled workflows in a public repository that has had
 # no activity for 60 days, and says so by email; switch it back on from the Actions tab.

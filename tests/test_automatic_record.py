@@ -301,7 +301,9 @@ class Config(unittest.TestCase):
         for bad in ("2026-13-01", "2026-02-30"):
             with self.assertRaises(config.ConfigError) as caught:
                 self.parse("{account: 'github-actions[bot]', credential_renewed: %s}" % bad)
-            self.assertIn("not a real day", str(caught.exception))
+            self.assertIn("cannot be read", str(caught.exception))
+        with self.assertRaises(config.ConfigError):
+            config.parse("spec: factory/0.1\nbig: " + "9" * 5000 + "\n")
 
     def test_passes_must_be_known_levels(self):
         for bad in ("[]", "[none]", "[code, all]", "code", "[high]"):

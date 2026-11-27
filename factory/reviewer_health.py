@@ -38,7 +38,8 @@ RAW = "application/vnd.github.raw+json"
 GUIDE = "https://github.com/theaiengineers/factory/blob/main/docs/AUTOMATIC_REVIEWER.md#when-the-credential-stops-working"
 
 OFF, WORKING, MISSING, REFUSED, FAILED, DUE = "off", "working", "missing", "refused", "failed", "renewal-due"
-STATES = (OFF, WORKING, MISSING, REFUSED, FAILED)
+UNREADABLE = "unreadable"
+STATES = (OFF, WORKING, MISSING, REFUSED, FAILED, UNREADABLE)
 MARK = "<!-- factory-reviewer-health: %s -->"
 FOOT = (f"\n\nHow to replace or renew the credential: {GUIDE}\n\nThis issue was opened by the factory's reviewer health "
         "check. It closes itself when a later check finds the problem gone.\n")
@@ -61,10 +62,14 @@ PROBLEMS = {
              "the check itself. The run's log says which.\n\n"
              "If pull requests are still being reviewed, nothing needs doing. If they are not, read the reviewer "
              "workflow's latest run."),
+    UNREADABLE: ("The reviewer health check cannot read the factory file",
+                 "The factory file on the default branch cannot be used, so the health check could not tell whether "
+                 "there is an automatic reviewer to watch, and made no model call. The run's log gives the reason.\n\n"
+                 "The review gate fails on the same file, so pull requests are held until it is mended."),
     DUE: ("The automatic reviewer's model credential is due for renewal",
           "The factory file says the credential was last renewed on a date that is now "
-          f"{RENEW_AFTER_DAYS} days or more ago (or is not a past date). A Claude subscription token lasts a year, "
-          "so it is close to expiring.\n\n"
+          f"{RENEW_AFTER_DAYS} days or more ago (or is more than a day in the future). A Claude subscription token "
+          "lasts a year, so it is close to expiring.\n\n"
           "Create a new one, set the secret again, and change `automatic.credential_renewed` in the factory file to "
           "the day you did it. The reviewer keeps working until the old one actually expires."),
 }
@@ -79,20 +84,23 @@ def read_rules(gh) -> dict:
 
 
 def check(gh, environ, model: str | None = None, call=reviewer.call_claude, pause=time.sleep) -> dict:
-    """The check step: {"state", "renewed", "why"}. It never raises for an ordinary failure."""
+    """The check step: {"state", "renewed", "read", "why"}. It never raises for an ordinary failure.
+
+    `read` says the factory file was read, so `renewed` is what the file gives (a day, or none). Without it nothing
+    is known about the day, and the report step must not conclude that a renewal is no longer due."""
     try:
         cfg = read_rules(gh)
     except urllib.error.HTTPError as e:
         if e.code != 404:
             raise
-        return {"state": OFF, "renewed": None, "why": f"there is no {config.FILE} on the default branch"}
+        return {"state": OFF, "renewed": None, "read": True, "why": f"there is no {config.FILE} on the default branch"}
     except config.ConfigError as e:
         # Not "off": a file that cannot be read must not quieten this check. The gate fails on the same file.
-        return {"state": FAILED, "renewed": None, "why": f"the factory file cannot be used ({e})"}
+        return {"state": UNREADABLE, "renewed": None, "read": False, "why": f"the factory file cannot be used ({e})"}
     automatic = (cfg["review"] or {}).get("automatic")
     if not automatic:
-        return {"state": OFF, "renewed": None, "why": "the factory file names no automatic reviewer"}
-    out = {"renewed": automatic.get("credential_renewed")}
+        return {"state": OFF, "renewed": None, "read": True, "why": "the factory file names no automatic reviewer"}
+    out = {"renewed": automatic.get("credential_renewed"), "read": True}
     try:
         reviewer.credential(environ)
     except reviewer.ReviewerError as e:
@@ -116,16 +124,18 @@ def check(gh, environ, model: str | None = None, call=reviewer.call_claude, paus
 
 def check_result(result) -> dict:
     """The JSON handed from the check step, checked again. Anything that is not such a result means the check step
-    did not finish, which is reported as a failure to reach the model. `known` is false then: nothing was learnt, so
-    nothing may be closed on the strength of it."""
+    did not finish, which is reported as a failure to reach the model. `read` is false then, as it is when the
+    factory file could not be used: nothing was learnt about the file, so nothing may be closed on the strength of it."""
     if not isinstance(result, dict) or result.get("state") not in STATES:
-        return {"state": FAILED, "renewed": None, "known": False}
+        return {"state": FAILED, "renewed": None, "read": False}
+    if result["state"] == UNREADABLE or result.get("read") is not True:
+        return {"state": result["state"], "renewed": None, "read": False}
     renewed = result.get("renewed")
     try:
         renewed = datetime.date.fromisoformat(renewed).isoformat() if isinstance(renewed, str) else None
     except ValueError:
         renewed = None
-    return {"state": result["state"], "renewed": renewed, "known": True}
+    return {"state": result["state"], "renewed": renewed, "read": True}
 
 
 def problems(result: dict, today: datetime.date) -> list[str]:
@@ -162,7 +172,7 @@ def report(gh, result, today: datetime.date | None = None) -> tuple[int, list[st
     result = check_result(result)
     today = today or datetime.datetime.now(datetime.timezone.utc).date()
     existing = own_issues(gh)
-    if result["state"] == OFF:
+    if result["state"] == OFF and result["read"]:
         said = ["No automatic reviewer to watch."]
         for number in sorted(n for numbers in existing.values() for n in numbers):
             said.append(close(gh, number, STOPPED))
@@ -177,9 +187,9 @@ def report(gh, result, today: datetime.date | None = None) -> tuple[int, list[st
             else:
                 made = json.loads(gh._request("POST", "issues", {"title": title, "body": MARK % kind + "\n" + words + FOOT}))
                 said.append(f"{title}: opened issue #{made.get('number')}.")
-        elif result["known"] and (kind == DUE or result["state"] == WORKING):
-            # A problem with the credential is known to be gone only when the model has answered, and a renewal is
-            # known not to be due only when the check step said what day the factory file gives.
+        elif result["read"] and (kind in (DUE, UNREADABLE) or result["state"] == WORKING):
+            # A problem with the credential is known to be gone only when the model has answered. A renewal is known
+            # not to be due, and the file is known to be usable, only when the check step read the factory file.
             for number in numbers:
                 said.append(close(gh, number, RESOLVED))
     return (1 if any(kind != DUE for kind in found) else 0), said
@@ -209,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.step == "check":
         result = check(gh, os.environ, args.model or None)
         with open(args.out, "w", encoding="utf-8") as f:
-            json.dump({"state": result["state"], "renewed": result["renewed"]}, f)
+            json.dump({"state": result["state"], "renewed": result["renewed"], "read": result["read"]}, f)
         print(f"Reviewer health: {result['state']} ({one_line(result['why'])})")
         return 0
     try:
@@ -229,7 +239,7 @@ def main(argv: list[str] | None = None) -> int:
     for line in said:
         print(line)
     if code:
-        print("::error::The automatic reviewer cannot reach its model. See the issue this check opened.")
+        print("::error::The automatic reviewer cannot work, or could not be checked. See the issue this check opened.")
     return code
 
 
