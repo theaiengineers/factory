@@ -13,8 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262   # v4
         with:
           persist-credentials: false
-      - run: python3 -m pip install --quiet pyyaml
+      - name: Install the one dependency, by hash, as a prebuilt wheel only
+        run: |
+          python3 -m pip install --require-hashes --only-binary :all: -r requirements.txt
       - run: python3 -m unittest discover -s tests -v
