@@ -29,7 +29,17 @@ or
 <!-- independent-review sha=<head commit> verdict=findings -->
 ```
 
-Below the marker, in plain words: what was checked, each blocking finding with the file and line, then any remarks that do not block, and how the change would be undone. A pass has the same shape, with no blocking findings. If the record is posted from the same login as the author's, say so in it.
+Directly below the marker comes a short block for a reader who does not read code: the owner, or an agent asked how things are going. Its heading is exactly `**In short**`, on a line of its own, and each line under it starts with `- `:
+
+```
+**In short**
+- A customer who pays twice in a minute could be charged twice.
+- The nightly report would silently leave out refunds.
+```
+
+For findings, write one plain sentence for each blocking finding: what would go wrong, and for whom. No file names, function names or jargon; those belong further down. For a pass, write one sentence saying what the change does. Keep each line under about 240 characters. Tools that report on the factory quote these lines as they stand, so they should make sense to someone who has not seen the change.
+
+Below that, in full: what was checked, each blocking finding with the file and line, then any remarks that do not block, and how the change would be undone. A pass has the same shape, with no blocking findings. If the record is posted from the same login as the author's, say so in it.
 
 Rules the gate enforces:
 
