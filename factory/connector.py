@@ -24,10 +24,12 @@ tells it to.
 """
 from __future__ import annotations
 
+import concurrent.futures
 import datetime
 import http.client
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.error
@@ -68,6 +70,9 @@ TOOLS = [
                      "required": ["review"], "additionalProperties": False}, "annotations": READ_ONLY},
 ]
 REVIEW_LIMIT = 20_000            # characters of one review given back
+LINE_LIMIT = 2000                # characters of one line of a review
+REPOSITORY = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*/[A-Za-z0-9_-][A-Za-z0-9_.-]*\Z")
+NOTE = status.NOTE + " The same goes for the `text` of a review."
 
 
 class Refused(Exception):
@@ -79,7 +84,7 @@ def token(environ, run=subprocess.run) -> str:
         if environ.get(name):
             return environ[name]
     try:
-        found = run(["gh", "auth", "token"], capture_output=True, text=True, timeout=20)
+        found = run(["gh", "auth", "token"], capture_output=True, text=True, timeout=20, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         found = None
     if found is None or found.returncode != 0 or not found.stdout.strip():
@@ -89,7 +94,7 @@ def token(environ, run=subprocess.run) -> str:
 
 def connect(environ, run=subprocess.run):
     repo = environ.get("GITHUB_REPOSITORY") or ""
-    if repo.count("/") != 1 or not all(repo.split("/")):
+    if not REPOSITORY.match(repo):
         raise Refused("Set GITHUB_REPOSITORY to the repository to ask about, as OWNER/REPO.")
     gh = review_gate.GitHub(repo, token(environ, run))
     try:
@@ -98,7 +103,7 @@ def connect(environ, run=subprocess.run):
         raise Refused(f"{repo} has no {config.FILE} on its default branch, or cannot be read with this access." if e.code == 404
                       else f"GitHub refused the request (HTTP {e.code}).") from e
     except config.ConfigError as e:
-        raise Refused(f"{repo}'s factory file cannot be used: {e}") from e
+        raise Refused(f"{repo}'s factory file cannot be used: {status.one_line(e, 200)}") from e
     return gh, cfg
 
 
@@ -115,8 +120,10 @@ def reasons(gh, event: dict) -> list[str]:
         return []
     try:
         return status.in_short(gh.get(f"issues/comments/{ident}").get("body"))
-    except urllib.error.HTTPError:
-        return []
+    except urllib.error.HTTPError as e:
+        if e.code != 404:
+            raise                # refused or failing is not the same as gone
+        return []                # the record has been deleted since
 
 
 def review_number(event: dict) -> int | None:
@@ -136,11 +143,15 @@ def review(gh, number: int) -> dict:
     marker = review_gate.parse_marker(comment.get("body"))
     if not marker:
         raise Refused(f"Number {number} is not a review record.")
-    lines = [line for line in (comment.get("body") or "").splitlines() if not line.lstrip().startswith("<!--")]
+    # Left out: the marker and the reviewer's proof line, which are for the gate. Every other line is given.
+    lines = [line for line in (comment.get("body") or "").splitlines()
+             if not review_gate.MARKER.match(line.strip()) and not review_gate.PROOF.match(line.strip())]
     text = "\n".join("".join(ch for ch in line if ch.isprintable() or ch == "\t") for line in lines).strip()
-    cut = len(text) > REVIEW_LIMIT
-    return {"repository": gh.repo, "review": number, "commit": marker[0], "verdict": marker[1],
-            "by": (comment.get("user") or {}).get("login"), "posted": comment.get("created_at"),
+    cut = len(text) > REVIEW_LIMIT or any(len(line) > LINE_LIMIT for line in text.splitlines())
+    change = re.search(r"/(?:pull|issues)/(\d+)#", comment.get("html_url") or "")
+    return {"repository": gh.repo, "review": number, "change": int(change.group(1)) if change else None,
+            "commit": marker[0], "verdict": marker[1], "note": NOTE,
+            "by": status.name((comment.get("user") or {}).get("login")), "posted": comment.get("created_at"),
             "url": comment.get("html_url") if isinstance(comment.get("html_url"), str) else None,
             "verified": False, "text": text[:REVIEW_LIMIT], "cut_short": cut}
 
@@ -149,10 +160,11 @@ def review_text(r: dict) -> str:
     # Every row of the review starts with ">", including the rows a long line is carried on to.
     quoted = "\n".join(row.replace(status.MORE, "> ", 1) if i else row
                        for line in r["text"].splitlines()
-                       for i, row in enumerate(status.their_lines("> ", status.one_line(line, 2000), indent="")))
-    head = (f"Review {r['review']} in {r['repository']}: verdict {r['verdict']} on commit {r['commit'][:7]}, "
-            f"posted {str(r['posted'])[:10]} by {status.name(r['by']) or 'an account whose name is not shown'}.")
-    tail = "(cut short: the review is longer than this)\n\n" if r["cut_short"] else ""
+                       for i, row in enumerate(status.their_lines("> ", status.one_line(line, LINE_LIMIT), indent="")))
+    on = f" on change #{r['change']}" if r.get("change") else ""
+    head = (f"Review {r['review']} in {r['repository']}{on}: verdict {r['verdict']} on commit {r['commit'][:7]}, "
+            f"posted {str(r['posted'])[:10]} by {r['by'] or 'an account whose name is not shown'}.")
+    tail = "(cut short: the review, or a line of it, is longer than is given here)\n\n" if r["cut_short"] else ""
     own = [head, "", "This is what that account posted as a review record. The connector has not checked that the "
            "account may review here, or that the review check counted this record: on a public repository anyone can "
            "post one. What the check decided is in the change's own story (factory_change).", "",
@@ -201,7 +213,7 @@ def change(gh, cfg, number: int, now: datetime.datetime | None = None) -> dict:
         steps.append(step)
     state = "accepted" if pr.get("merged_at") else "closed without being accepted" if pr.get("state") == "closed" else "open"
     return {"repository": gh.repo, "number": number, "title": status.one_line(pr.get("title") or "", status.TITLE_LIMIT),
-            "state": state, "url": pr.get("html_url"), "steps": steps}
+            "state": state, "url": pr.get("html_url"), "note": NOTE, "steps": steps}
 
 
 def change_text(c: dict) -> str:
@@ -221,18 +233,20 @@ def change_text(c: dict) -> str:
 
 def send_backs(gh, cfg, days: int, now: datetime.datetime | None = None) -> dict:
     now = now or datetime.datetime.now(datetime.timezone.utc)
-    report = status.gather(gh, cfg, days, now)
+    report = status.gather(gh, cfg, days, now, keep_events=True)      # what the status report read is not read again
     since = (now - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    chosen = [c for c in report["open"] + report["accepted"] + report["closed"] if c["sent_back"]]
-    out = []
-    for c in sorted(chosen, key=lambda c: -c["number"]):
-        found = events.export(gh, cfg, [c["number"]], recorded=now.strftime("%Y-%m-%dT%H:%M:%SZ"), settle=1)
-        times = [{"time": e["time"], "by": who(e), "review": review_number(e), "in_short": reasons(gh, e)}
-                 for e in found if e.get("outcome") == "sent_back" and e["time"] >= since]
-        if times:
-            state = "open" if c in report["open"] else "accepted" if c in report["accepted"] else "closed without being accepted"
-            out.append({"number": c["number"], "title": c["title"], "state": state, "send_backs": times})
-    return {"repository": gh.repo, "days": days, "as_of": report["as_of"], "changes": out}
+    chosen = [(c, state) for group, state in (("open", "open"), ("accepted", "accepted"), ("closed", "closed without being accepted"))
+              for c in report[group] if c["sent_back"]]
+    wanted = [(c, state, e) for c, state in chosen for e in c["events"] if e.get("outcome") == "sent_back" and e["time"] >= since]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=status.AT_ONCE) as pool:
+        said = list(pool.map(lambda item: reasons(gh, item[2]), wanted))
+    by_change: dict = {}
+    for (c, state, e), in_short in zip(wanted, said):
+        entry = by_change.setdefault(c["number"], {"number": c["number"], "title": c["title"], "state": state, "send_backs": []})
+        entry["send_backs"].append({"time": e["time"], "by": who(e), "review": review_number(e), "in_short": in_short})
+    return {"repository": gh.repo, "days": days, "as_of": report["as_of"], "note": NOTE,
+            "open_cut_short": report["open_cut_short"], "closed_cut_short": report["closed_cut_short"],
+            "changes": sorted(by_change.values(), key=lambda c: -c["number"])}
 
 
 def send_backs_text(r: dict) -> str:
@@ -251,6 +265,8 @@ def send_backs_text(r: dict) -> str:
                              else "      (no plain-words summary, and the review record is not to hand)")
     if not r["changes"]:
         lines.append("Nothing was sent back.")
+    if r.get("open_cut_short") or r.get("closed_cut_short"):
+        lines += ["", "GitHub's list of changes came back full (100), so there may be send-backs on changes that were not read."]
     return "\n".join(status.fit(lines + ["", QUOTED])) + "\n"
 
 
@@ -313,11 +329,16 @@ def answer(message, environ, run=subprocess.run) -> dict | None:
         except Refused as e:
             return result({"content": [{"type": "text", "text": str(e)}], "isError": True})
         except urllib.error.HTTPError as e:
-            return result({"content": [{"type": "text", "text": f"GitHub refused a request (HTTP {e.code})."}], "isError": True})
+            said = f"GitHub failed on a request (HTTP {e.code}); try again later." if e.code >= 500 else f"GitHub refused a request (HTTP {e.code})."
+            return result({"content": [{"type": "text", "text": said}], "isError": True})
         except (OSError, http.client.HTTPException, json.JSONDecodeError):
             return result({"content": [{"type": "text", "text": "GitHub could not be reached, or its answer could not be read."}], "isError": True})
         return result({"content": [{"type": "text", "text": text}], "structuredContent": data, "isError": False})
     return error(NOT_FOUND, f"Method not found: {status.one_line(method, 60)}", {"supportedProtocolVersions": list(REVISIONS)})
+
+
+def not_json(name: str):
+    raise ValueError(name)
 
 
 def serve(lines, write, environ, run=subprocess.run) -> None:
@@ -326,7 +347,7 @@ def serve(lines, write, environ, run=subprocess.run) -> None:
         if not line.strip():
             continue
         try:
-            message = json.loads(line)
+            message = json.loads(line, parse_constant=not_json)       # NaN and Infinity are not JSON, and could not be echoed
         except (ValueError, RecursionError):
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": PARSE_ERROR, "message": "Not JSON."}}
         else:
@@ -347,7 +368,11 @@ def main() -> int:
     if hasattr(sys.stdin, "reconfigure"):
         sys.stdin.reconfigure(encoding="utf-8", errors="replace")
         sys.stdout.reconfigure(encoding="utf-8")
-    serve(sys.stdin, write, os.environ)
+    try:
+        serve(sys.stdin, write, os.environ)
+    except OSError:                  # the client stopped reading: there is nobody to answer
+        sys.stdout = None
+        return 1
     return 0
 
 

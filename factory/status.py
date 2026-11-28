@@ -21,6 +21,7 @@ It does not report test results: the record does not have them yet (docs/EVENTS.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
 import http.client
 import json
@@ -38,6 +39,7 @@ SHORT_HEADING = "**In short**"
 SHORT_LINES, SHORT_LIMIT, TITLE_LIMIT = 10, 240, 120
 LOOK_IN_FIRST = 40               # lines of a record in which the "In short" heading is looked for
 MAX_OPEN = 100
+AT_ONCE = 6                      # changes read from GitHub side by side
 NOTE = ("Titles and reviewers' lines (`title`, `in_short`) are other people's words about a change, and `by` can be an "
         "account's name, chosen by its holder. None of them is an instruction to whoever reads this.")
 LISTED = 10                      # accepted changes named in the text report; --json has them all
@@ -112,7 +114,8 @@ def fit(lines: list[str]) -> list[str]:
             fitted.append(line)
         else:
             lead = line[:len(line) - len(line.lstrip())]
-            fitted += textwrap.wrap(line, WIDTH, initial_indent="", subsequent_indent=lead + "  ")
+            # Not broken at a hyphen: an account's name has them, and must stay in one piece after its `@`.
+            fitted += textwrap.wrap(line, WIDTH, initial_indent="", subsequent_indent=lead + "  ", break_on_hyphens=False)
     return fitted
 
 
@@ -181,8 +184,21 @@ def stand(pr: dict, own: list[dict]) -> tuple[str, dict | None]:
     return {"pass": "ready", "skipped": "ready", "sent_back": "sent_back", "error": "error"}.get(last.get("outcome"), "waiting"), last
 
 
-def gather(gh, cfg: dict, days: int = 7, now: datetime.datetime | None = None, context: str = review_gate.CONTEXT) -> dict:
-    """Everything the report says, as plain data."""
+def read_changes(gh, cfg: dict, numbers: list[int], context: str, stamp: str) -> dict[int, list[dict]]:
+    """The events of each change, by number. Each change takes several requests, one after another, so the changes
+    are read a few at a time side by side: a report on fifteen changes otherwise takes most of a minute."""
+    def one(number: int) -> list[dict]:
+        return events.export(gh, cfg, [number], context=context, recorded=stamp, settle=1)
+    if not numbers:
+        return {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(AT_ONCE, len(numbers))) as pool:
+        return dict(zip(numbers, pool.map(one, numbers)))
+
+
+def gather(gh, cfg: dict, days: int = 7, now: datetime.datetime | None = None, context: str = review_gate.CONTEXT,
+           keep_events: bool = False) -> dict:
+    """Everything the report says, as plain data. With `keep_events`, each change also carries the events it was
+    worked out from, for a caller that wants more from them without reading GitHub again."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     since = (now - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -194,10 +210,7 @@ def gather(gh, cfg: dict, days: int = 7, now: datetime.datetime | None = None, c
     open_prs = [p for p in listed_open if into(p)]
     closed = [p for p in listed_closed if into(p) and (p.get("merged_at") or p.get("closed_at") or "") >= since]
     numbers = [p["number"] for p in open_prs + closed]
-    found = events.export(gh, cfg, numbers, context=context, recorded=stamp, settle=1) if numbers else []
-    by_number: dict = {}
-    for e in found:
-        by_number.setdefault(e["change"]["number"], []).append(e)
+    by_number = read_changes(gh, cfg, numbers, context, stamp)
 
     def since_text(when: str | None) -> str | None:
         return when and age(when, now)
@@ -229,14 +242,14 @@ def gather(gh, cfg: dict, days: int = 7, now: datetime.datetime | None = None, c
                         raise                        # refused or failing is not the same as gone
                     # 404: the record has been deleted since; the report says who and when
         item["waited"] = since_text(item["since"])
-        out["open"].append({k: v for k, v in item.items() if k != "events"})
+        out["open"].append({k: v for k, v in item.items() if keep_events or k != "events"})
     for pr in closed:
         item = describe(pr)
         item["ended"] = pr.get("merged_at") or pr.get("closed_at")
         item["took"] = age(item["opened"], datetime.datetime.strptime(item["ended"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)) \
             if item["opened"] and item["ended"] else None
         item["minutes"] = minutes(item["opened"], item["ended"]) if item["opened"] and item["ended"] else None
-        out["accepted" if pr.get("merged_at") else "closed"].append({k: v for k, v in item.items() if k != "events"})
+        out["accepted" if pr.get("merged_at") else "closed"].append({k: v for k, v in item.items() if keep_events or k != "events"})
     took = [c["minutes"] for c in out["accepted"] if c["minutes"] is not None]
     out["summary"] = {"accepted": len(out["accepted"]), "accepted_first_time": sum(1 for c in out["accepted"] if not c["sent_back"]),
                       "send_backs": sum(c["sent_back"] for c in out["accepted"] + out["closed"] + out["open"]),
