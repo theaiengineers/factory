@@ -14,7 +14,9 @@ This repository runs on itself: its own [factory.yml](factory.yml) and gate judg
 
 The automatic reviewer. An optional station that does the review: when a change's tests pass, a model reads it against your standard and records pass or findings. It uses your own Claude subscription or API key, has no tools, and by default leaves high-risk changes to a person. A scheduled health check opens an issue when its credential stops working. See [docs/AUTOMATIC_REVIEWER.md](docs/AUTOMATIC_REVIEWER.md).
 
-The record of every step. One command writes out what happened to each change (opened, reviewed, sent back, a person needed, merged) as events, from what GitHub already holds. Test results are not in it yet. See [docs/EVENTS.md](docs/EVENTS.md).
+The record of every step. One command writes out what happened to each change (opened, reviewed, sent back, a person needed, merged) as events, from what GitHub already holds. Test results are not in it yet.
+
+How the factory is getting on. One command says, in plain words, what is waiting for review, what was sent back and why, and what was accepted lately; an agent can run it to answer the question. See [docs/STATUS.md](docs/STATUS.md). See [docs/EVENTS.md](docs/EVENTS.md).
 
 ## Setting it up
 
