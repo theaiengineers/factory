@@ -136,8 +136,6 @@ class OneChange(unittest.TestCase):
         gh = FakeGitHub(
             [pull(state="closed", merged_at="2026-01-15T12:41:49Z", closed_at="2026-01-15T12:41:49Z", head=B)],
             commits={12: [commit(A, "2026-01-15T12:00:00Z"), commit(B, "2026-01-15T12:24:53Z")]},
-            runs={A: [run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z"), run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)],
-                  B: [run("tests", "2026-01-15T12:25:00Z", "2026-01-15T12:26:00Z", ident=3), run("lint", "2026-01-15T12:25:01Z", "2026-01-15T12:25:30Z", ident=4)]},
             statuses={A: [status("2026-01-15T12:05:20Z", "failure", f"No independent review recorded for {A[:7]} (code change, not high risk)"),
                           status("2026-01-15T12:10:00Z", "failure", f"No independent review recorded for {A[:7]} (code change, not high risk)", ident=2),
                           status("2026-01-15T12:16:00Z", "failure", f"Review of {A[:7]} has open findings: fix or answer them, then review again", ident=3)],
@@ -147,12 +145,12 @@ class OneChange(unittest.TestCase):
                            {"id": 9, "created_at": "2026-01-15T12:20:00Z", "user": {"login": "alice"}, "body": "thanks"}]})
         found = export(gh, numbers=[12])
         self.assertEqual(told(found), [
-            ("change.opened", None, None, ""), ("station.entered", "testing", None, "a"), ("station.entered", "qa", None, "a"),
-            ("station.finished", "testing", "pass", "a"), ("station.finished", "qa", "sent_back", "a"),
-            ("change.updated", None, None, "b"), ("station.entered", "testing", None, "b"), ("station.entered", "qa", None, "b"),
-            ("station.finished", "testing", "pass", "b"), ("station.finished", "qa", "pass", "b"), ("change.merged", None, None, "b")])
-        self.assertEqual(events.check_lines(json.dumps(e) for e in found), (11, []))
-        sent_back, passed, merged = found[4], found[9], found[10]
+            ("change.opened", None, None, ""), ("station.entered", "qa", None, "a"), ("station.finished", "qa", "sent_back", "a"),
+            ("change.updated", None, None, "b"), ("station.entered", "qa", None, "b"), ("station.finished", "qa", "pass", "b"),
+            ("change.merged", None, None, "b")])
+        self.assertEqual(events.check_lines(json.dumps(e) for e in found), (7, []))
+        self.assertFalse([path for path in gh.asked if "check-runs" in path])           # the checks station is not read
+        sent_back, passed, merged = found[2], found[5], found[6]
         self.assertEqual((sent_back["actor"], sent_back["evidence"], sent_back["reason"]["code"]),
                          ({"kind": "person", "id": "alice"}, "https://github.test/c/7", "review.findings"))
         self.assertEqual((passed["actor"], passed["evidence"]), ({"kind": "agent", "id": BOT}, "https://github.test/c/8"))
@@ -198,18 +196,15 @@ class OneChange(unittest.TestCase):
                          ("station.finished", "pass", {"kind": "person", "id": "mallory"}, "review.status_unrecognised",
                           {"factory": {"unrecognised_status": True}}))
 
-    def test_two_stations_deciding_in_the_same_second_are_both_kept(self):
+    def test_three_decisions_in_the_same_second_are_all_kept_in_order(self):
         at = "2026-01-15T12:06:00Z"
-        gh = FakeGitHub([pull()], runs={A: [run("tests", at, at), run("lint", at, at, ident=2)]},
-                        statuses={A: [status(at, "failure", f"No independent review recorded for {A[:7]}"),
-                                      status(at, "failure", f"Review of {A[:7]} has open findings: fix", ident=2),
-                                      status(at, "success", f"Review record for {A[:7]} says pass", ident=3)]})
+        gh = FakeGitHub([pull()], statuses={A: [status(at, "failure", f"No independent review recorded for {A[:7]}"),
+                                                status(at, "failure", f"Review of {A[:7]} has open findings: fix", ident=2),
+                                                status(at, "success", f"Review record for {A[:7]} says pass", ident=3)]})
         found = [e for e in export(gh, numbers=[12]) if e["time"] == at]
-        self.assertEqual(sorted((e["type"], e["station"], e.get("outcome")) for e in found),
-                         sorted([("station.entered", "testing", None), ("station.finished", "testing", "pass"), ("station.entered", "qa", None),
-                                 ("station.finished", "qa", "sent_back"), ("station.finished", "qa", "pass")]))
-        self.assertEqual(len({e["id"] for e in found}), 5)
-        self.assertEqual([e.get("outcome") for e in found if e["station"] == "qa" and e["type"] == "station.finished"], ["sent_back", "pass"])
+        self.assertEqual([(e["type"], e.get("outcome")) for e in found],
+                         [("station.entered", None), ("station.finished", "sent_back"), ("station.finished", "pass")])
+        self.assertEqual(len({e["id"] for e in found}), 3)
 
     def test_one_second_keeps_the_order_the_gate_set_its_statuses_in(self):
         # A pass, then (the record deleted) a wait, in one second: the record must not end on the pass.
@@ -239,12 +234,58 @@ class OneChange(unittest.TestCase):
 
     def test_two_pull_requests_sharing_a_commit_each_have_its_events(self):
         both = {A: [status("2026-01-15T12:06:00Z", "success", "No code changed: no independent review needed")]}
-        found = export(FakeGitHub([pull(12), pull(13)], statuses=both, runs={A: [run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z"),
-                                                                              run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)]}))
+        found = export(FakeGitHub([pull(12), pull(13)], statuses=both))
         per = {n: [(e["type"], e.get("station")) for e in found if e["change"]["number"] == n] for n in (12, 13)}
         self.assertEqual(per[12], per[13])
-        self.assertEqual(len(per[12]), 4)
+        self.assertEqual(len(per[12]), 2)
         self.assertEqual(len({e["id"] for e in found}), len(found))
+
+    def test_a_status_that_names_one_of_two_pull_requests_on_a_commit_is_about_that_one(self):
+        # With several open pull requests on one head commit, the gate sets one status and names the worst-off first.
+        shared = {A: [status("2026-01-15T12:06:00Z", "failure", f"#12 into main: No independent review recorded for {A[:7]} (code change, not high risk)"),
+                      status("2026-01-15T12:16:00Z", "failure", f"#12 into main: Review of {A[:7]} has open findings: fix or answer them", ident=2),
+                      status("2026-01-15T12:20:00Z", "failure", f"#12 into main: Automatic review passed {A[:7]}; this change also needs a person's review", ident=3),
+                      status("2026-01-15T12:30:00Z", "success", f"Review record for {A[:7]} says pass (a process control, not proof)", ident=4)]}
+        found = export(FakeGitHub([pull(12), pull(13)], statuses=shared))
+        qa = lambda n: [(e["type"], e.get("outcome"), (e.get("reason") or {}).get("code")) for e in found      # noqa: E731
+                        if e["change"]["number"] == n and e.get("station") == "qa"]
+        self.assertEqual(qa(12), [("station.entered", None, None), ("station.finished", "sent_back", "review.findings"),
+                                  ("action.needed", None, "review.person_needed"), ("action.cleared", None, None), ("station.finished", "pass", None)])
+        self.assertEqual(qa(13), [("station.finished", "pass", None)])            # only the status that speaks for every one of them
+        self.assertNotIn("unrecognised", json.dumps(found))
+
+    def test_the_gates_own_words_for_a_shared_commit_are_understood(self):
+        # Driven through the gate itself: two open pull requests on one commit, one of them with findings.
+        class Shared:
+            repo = "example/shop"
+
+            def one(self, n):
+                return {"number": n, "state": "open", "draft": False, "head": {"sha": A}, "user": {"login": "alice"},
+                        "base": {"ref": "main", "repo": {"default_branch": "main"}}}
+
+            def get(self, path):
+                if path.startswith("pulls/"):
+                    return self.one(int(path.split("/")[1]))
+                if path.startswith("collaborators/"):
+                    return {"permission": "write"}
+                if path.startswith("commits/"):
+                    return {"commit": {"committer": {"date": "2026-01-15T12:00:00Z"}}}
+                raise AssertionError(path)
+
+            def pages(self, path, limit):
+                if path.endswith("/pulls"):
+                    return [self.one(12), self.one(13)]
+                if "/files" in path:
+                    return [{"filename": "api/x.py"}]
+                return [record(A, "findings", "2026-01-15T12:15:00Z")] if path.startswith("issues/12/") else []
+
+            def raw_file(self, path, ref):
+                return RULES
+        result = review_gate.evaluate(Shared(), 12, A)
+        self.assertEqual(len(result["results"]), 2)
+        self.assertTrue(result["description"].startswith("#12 into main: "), result["description"])
+        self.assertEqual(events.shared_with(result["description"])[0], 12)
+        self.assertEqual(events.decision(result["state"], result["description"])[0], events.SENT_BACK)
 
     def test_who_and_the_link_are_read_as_they_are_now_and_the_rest_is_fixed(self):
         said = {A: [status("2026-01-15T12:30:00Z", "failure", f"Review of {A[:7]} has open findings: fix")]}
@@ -280,176 +321,41 @@ class OneChange(unittest.TestCase):
         self.assertEqual((passed["actor"], passed["evidence"]), ({"kind": "system", "id": "review gate"}, "https://github.test/gate-run"))
 
 
-class Testing(unittest.TestCase):
-    def station(self, runs, rules=RULES):
-        found = export(FakeGitHub([pull()], runs={A: runs}), rules=rules, numbers=[12])
-        return [e for e in found if e.get("station") == "testing"]
-
-    def test_a_failed_check_fails_the_station_and_is_named(self):
-        entered, finished = self.station([run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"),
-                                          run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)])
-        self.assertEqual((entered["time"], finished["time"], finished["outcome"], finished["reason"]["code"], finished["data"]["factory"]["failed"]),
-                         ("2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", "failed", "checks.failed", ["tests"]))
-
-    def test_not_finished_while_a_check_runs_or_has_not_reported(self):
-        self.assertEqual([e["type"] for e in self.station([run("tests", "2026-01-15T12:05:10Z"), run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)])],
-                         ["station.entered"])
-        self.assertEqual([e["type"] for e in self.station([run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z")])], ["station.entered"])
-        self.assertEqual(self.station([run("unrelated", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z")]), [])
-
-    FIRST = [run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"),
-             run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)]
-
-    def test_a_rerun_is_a_second_entry_and_finish_and_the_first_stays(self):
-        before = self.station(self.FIRST)
-        after = self.station(self.FIRST + [run("tests", "2026-01-15T12:10:00Z", "2026-01-15T12:11:00Z", ident=5)])
-        self.assertEqual([(e["type"], e.get("outcome"), e["time"]) for e in after],
-                         [("station.entered", None, "2026-01-15T12:05:10Z"), ("station.finished", "failed", "2026-01-15T12:06:00Z"),
-                          ("station.entered", None, "2026-01-15T12:10:00Z"), ("station.finished", "pass", "2026-01-15T12:11:00Z")])
-        self.assertEqual(after[:2], before)                                 # the earlier export's events, unchanged
-        running = self.station(self.FIRST + [run("tests", "2026-01-15T12:10:00Z", ident=5)])
-        self.assertEqual([e["type"] for e in running], ["station.entered", "station.finished", "station.entered"])
-
-    def test_a_failure_and_the_rerun_that_starts_in_the_same_second(self):
-        found = self.station([run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"),
-                              run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2),
-                              run("tests", "2026-01-15T12:06:00Z", "2026-01-15T12:07:00Z", ident=5)])
-        self.assertEqual([(e["type"], e.get("outcome")) for e in found],
-                         [("station.entered", None), ("station.finished", "failed"), ("station.entered", None), ("station.finished", "pass")])
-
-    def test_a_run_waiting_for_a_machine_is_not_read(self):
-        # GitHub gives a queued run a start time and changes it when the run really starts.
-        queued = {**run("tests", "2026-01-15T12:10:00Z"), "status": "queued"}
-        self.assertEqual(self.station([queued]), [])
-        started = self.station([run("tests", "2026-01-15T12:14:30Z")])
-        self.assertEqual([(e["type"], e["time"]) for e in started], [("station.entered", "2026-01-15T12:14:30Z")])
-        # ...and one queued behind a failure does not change what the failure left.
-        self.assertEqual(self.station(self.FIRST + [{**run("tests", "2026-01-15T12:10:00Z", ident=5), "status": "queued"}]), self.station(self.FIRST))
-
-    def test_a_run_that_fails_within_a_second_and_is_rerun_in_that_second(self):
-        at = "2026-01-15T12:06:00Z"
-        found = self.station([run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2), run("tests", at, at, conclusion="failure", ident=3),
-                              run("tests", at, "2026-01-15T12:07:00Z", ident=5)])
-        self.assertEqual([(e["type"], e.get("outcome")) for e in found],
-                         [("station.entered", None), ("station.finished", "failed"), ("station.entered", None), ("station.finished", "pass")])
-
-    def test_a_changed_list_of_required_checks_or_station_name_gives_new_ids(self):
-        runs = [run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"), run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)]
-        said = {A: [status("2026-01-15T12:06:00Z", "success", "No code changed: no independent review needed")]}
-        base = export(FakeGitHub([pull()], runs={A: runs}, statuses=said), numbers=[12])
-        fewer = export(FakeGitHub([pull()], runs={A: runs}, statuses=said), rules=RULES.replace("[tests, lint]", "[lint]"), numbers=[12])
-        renamed = export(FakeGitHub([pull()], runs={A: runs}, statuses=said), rules=RULES.replace("station: qa", "station: review"), numbers=[12])
-        ids = lambda found, station: {e["id"] for e in found if e.get("station") == station}      # noqa: E731
-        self.assertFalse(ids(base, "testing") & ids(fewer, "testing"))
-        self.assertFalse(ids(base, "qa") & ids(renamed, "review"))
-        self.assertEqual(events.check_lines(json.dumps(e) for e in base + fewer + renamed)[1], [])
-
-    def test_the_newest_run_of_a_name_stands_whichever_suite_it_is_in(self):
-        # Closed and reopened: the same name runs again in a new suite. The old failure does not stand for ever.
-        found = self.station(self.FIRST + [run("tests", "2026-01-15T12:10:00Z", "2026-01-15T12:11:00Z", suite=2, ident=5),
-                                           run("lint", "2026-01-15T12:10:01Z", "2026-01-15T12:10:30Z", suite=2, ident=6)])
-        self.assertEqual([(e["type"], e.get("outcome")) for e in found],
-                         [("station.entered", None), ("station.finished", "failed"), ("station.entered", None), ("station.finished", "pass")])
-        self.assertEqual(found[-1]["evidence"], f"https://github.com/example/shop/commit/{A}/checks")
-
-    def test_a_run_that_starts_and_finishes_in_one_second_and_one_dated_backwards(self):
-        at = "2026-01-15T12:05:10Z"
-        self.assertEqual([(e["type"], e.get("outcome")) for e in self.station([run("tests", at, at), run("lint", at, at, ident=2)])],
-                         [("station.entered", None), ("station.finished", "pass")])
-        back = self.station([run("tests", at, "2026-01-15T12:00:00Z"), run("lint", at, at, ident=2)])
-        self.assertEqual([(e["type"], e["time"]) for e in back], [("station.entered", at), ("station.finished", at)])
+class Settled(unittest.TestCase):
+    def test_nothing_from_the_last_minute_is_written(self):
+        gh = FakeGitHub([pull()], statuses={A: [status("2026-01-15T12:06:00Z", "success", "No code changed")]})
+        at = lambda when, **kw: [e["time"] for e in events.export(gh, config.parse(RULES), [12], recorded=when, **kw)]     # noqa: E731
+        self.assertEqual(at("2026-01-15T12:06:30Z"), ["2026-01-15T12:05:07Z"])
+        self.assertEqual(at("2026-01-15T12:07:00Z"), ["2026-01-15T12:05:07Z", "2026-01-15T12:06:00Z"])
+        self.assertEqual(at("2026-01-15T12:06:00Z", settle=0), ["2026-01-15T12:05:07Z"])     # never the second still going on
 
     def test_an_earlier_export_is_always_inside_a_later_one(self):
-        # Generated lives of check runs, as GitHub shows them from second to second, exported at every second.
-        #   normal     made, waits (with the made time as its start), really starts, may finish
-        #   cancelled  made, waits, is cancelled without starting: it keeps the made time as its start
-        #   copy       "Re-run failed jobs": a new id carrying an earlier finished run's times and result
-        rng = random.Random(7)
+        # Generated histories of gate statuses, several to a second, exported at every second along the way.
+        rng = random.Random(11)
         second = lambda n: f"2026-01-15T12:{n // 60:02d}:{n % 60:02d}Z"      # noqa: E731
-
-        def seen_at(lives, moment):
-            out = []
-            for ident, (kind, name, made, start, end, conclusion, suite) in enumerate(lives, 1):
-                if made > moment:
-                    continue
-                base = {"id": ident, "name": name, "check_suite": {"id": suite}, "html_url": f"https://github.test/runs/{ident}"}
-                if kind == "copy" or (end is not None and end <= moment and (kind == "cancelled" or start <= moment)):
-                    out.append({**base, "status": "completed", "started_at": second(start), "completed_at": second(end), "conclusion": conclusion})
-                elif kind == "normal" and start <= moment:
-                    out.append({**base, "status": "in_progress", "started_at": second(start), "completed_at": None, "conclusion": None})
-                else:
-                    out.append({**base, "status": "queued", "started_at": second(made), "completed_at": None, "conclusion": None})
-            return out
-
-        for _ in range(400):
-            lives, made = [], 0
-            for _ in range(rng.randint(1, 7)):
-                made += rng.randint(0, 3)                 # GitHub makes runs in order, so a later id is never made earlier
-                name, suite, kind = rng.choice(["tests", "lint"]), rng.randint(1, 2), rng.choice(["normal"] * 6 + ["cancelled", "copy"])
-                finished = [life for life in lives if life[4] is not None and life[4] <= made and life[0] != "cancelled"]
-                if kind == "copy" and finished:
-                    _, name, _, start, end, conclusion, suite = rng.choice(finished)
-                    lives.append(("copy", name, made, start, end, conclusion, suite))
-                elif kind == "cancelled":
-                    lives.append(("cancelled", name, made, made, made + rng.randint(0, 3), "cancelled", suite))
-                else:
-                    start = made + rng.randint(0, 3)
-                    end = start + rng.randint(0, 4) if rng.random() < 0.85 else None
-                    lives.append(("normal", name, made, start, end, rng.choice(["success", "success", "failure", "cancelled"]), suite))
+        words = [("failure", f"No independent review recorded for {A[:7]}"), ("failure", f"Review of {A[:7]} has open findings: fix"),
+                 ("success", f"Review record for {A[:7]} says pass"), ("failure", f"Automatic review passed {A[:7]}; this change also needs a person's review"),
+                 ("success", "No code changed: no independent review needed"), ("error", "Gate could not decide: x"), ("success", "By hand"),
+                 ("failure", "By hand"), ("pending", "Hm"), ("failure", f"#12 into main: Review of {A[:7]} has open findings: fix"),
+                 ("failure", f"#13 into main: No independent review recorded for {A[:7]}")]
+        for _ in range(300):
+            when, history = 6, []
+            for ident in range(1, rng.randint(2, 12)):
+                when += rng.choice([0, 0, 1, 2])
+                state, description = rng.choice(words)
+                history.append(status(second(when), state, description, ident=ident))
             earlier = {}
-            for moment in range(0, 34):
-                gh = FakeGitHub([pull()], runs={A: seen_at(lives, moment)})
-                found = [e for e in events.export(gh, config.parse(RULES), [12], recorded=second(moment), settle=1) if e.get("station") == "testing"]
+            for moment in range(5, when + 3):
+                shown = [s for s in history if s["created_at"] <= second(moment)]
+                rng.shuffle(shown)                                   # GitHub's list order is not relied on
+                found = events.export(FakeGitHub([pull()], statuses={A: shown}), config.parse(RULES), [12], recorded=second(moment), settle=1)
                 now = {e["id"]: {k: v for k, v in e.items() if k != "recorded"} for e in found}
                 self.assertEqual(len(now), len(found))
                 for ident, event in earlier.items():
-                    self.assertEqual(now.get(ident), event, (lives, moment))
-                kinds = [e["type"] for e in found]
-                self.assertEqual(kinds, (["station.entered", "station.finished"] * len(kinds))[:len(kinds)], (lives, moment))
+                    self.assertEqual(now.get(ident), event, (history, moment))
+                self.assertEqual([e["time"] for e in found], sorted(e["time"] for e in found))
                 earlier = now
-
-    def test_rerunning_only_the_failed_job_copies_the_others_and_changes_nothing_already_said(self):
-        first = [run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="failure"),
-                 run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)]
-        before = self.station(first)
-        copy = run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=9)          # a new id, the old times
-        during = self.station(first + [copy, {**run("tests", "2026-01-15T12:10:00Z", ident=8), "status": "queued"}])
-        after = self.station(first + [copy, run("tests", "2026-01-15T12:10:07Z", "2026-01-15T12:11:00Z", ident=8)])
-        self.assertEqual([(e["type"], e.get("outcome")) for e in before], [("station.entered", None), ("station.finished", "failed")])
-        self.assertEqual((during, after[:2]), (before, before))
-        self.assertEqual([(e["type"], e.get("outcome"), e["time"]) for e in after[2:]],
-                         [("station.entered", None, "2026-01-15T12:10:07Z"), ("station.finished", "pass", "2026-01-15T12:11:00Z")])
-
-    def test_a_run_cancelled_while_it_waited_does_not_move_what_was_said(self):
-        # It keeps the time it was made as its start. An export during the wait must not have said otherwise.
-        sibling = run("lint", "2026-01-15T12:10:04Z", ident=2)
-        waiting = {**run("tests", "2026-01-15T12:10:00Z", ident=1), "status": "queued"}
-        cancelled = run("tests", "2026-01-15T12:10:00Z", "2026-01-15T12:10:05Z", conclusion="cancelled", ident=1)
-        during = self.station([waiting, sibling])
-        after = self.station([cancelled, sibling])
-        self.assertEqual(during, [])
-        self.assertEqual([(e["type"], e["time"]) for e in after], [("station.entered", "2026-01-15T12:10:00Z")])
-
-    def test_nothing_from_the_last_minute_is_written(self):
-        gh = FakeGitHub([pull()], runs={A: self.FIRST}, statuses={A: [status("2026-01-15T12:06:00Z", "success", "No code changed")]})
-        at = lambda when, **kw: [e["time"] for e in events.export(gh, config.parse(RULES), [12], recorded=when, **kw)]     # noqa: E731
-        self.assertEqual(at("2026-01-15T12:06:30Z"), ["2026-01-15T12:05:07Z", "2026-01-15T12:05:10Z"])
-        self.assertEqual(len(at("2026-01-15T12:07:00Z")), 4)
-        self.assertEqual(len(at("2026-01-15T12:06:00Z", settle=0)), 2)                    # never the second still going on
-
-    def test_earlier_attempts_are_asked_for(self):
-        gh = FakeGitHub([pull()], runs={A: self.FIRST})
-        export(gh, numbers=[12])
-        self.assertTrue([p for p in gh.asked if "/check-runs?filter=all" in p])
-
-    def test_a_cancelled_check_is_not_a_pass(self):
-        _, finished = self.station([run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z", conclusion="cancelled"),
-                                    run("lint", "2026-01-15T12:05:12Z", "2026-01-15T12:05:40Z", ident=2)])
-        self.assertEqual((finished["outcome"], finished["reason"]["text"]), ("failed", "A required check did not pass"))
-
-    def test_no_required_checks_no_testing_events(self):
-        rules = RULES.replace("    require: [tests, lint]\n", "")
-        self.assertEqual(self.station([run("tests", "2026-01-15T12:05:10Z", "2026-01-15T12:06:00Z")], rules=rules), [])
+            self.assertEqual(events.check_lines(json.dumps(e) for e in earlier.values())[1], [])
 
 
 class Listing(unittest.TestCase):
@@ -464,6 +370,13 @@ class Listing(unittest.TestCase):
         self.assertEqual(numbers(export(FakeGitHub(prs), rules=without_branch)), [1, 2, 3, 4])
         merged, = [e for e in export(FakeGitHub(prs)) if e["type"] == "change.merged"]
         self.assertEqual(merged["actor"]["id"], "bob")                              # read again: the list leaves it out
+
+    def test_words_at_the_front_that_only_look_like_the_gates(self):
+        self.assertEqual(events.shared_with("#12 into main: Review of abc has open findings"), (12, "Review of abc has open findings"))
+        self.assertEqual(events.shared_with("Review of abc has open findings"), (None, "Review of abc has open findings"))
+        self.assertEqual(events.shared_with(None), (None, ""))
+        self.assertEqual(events.decision("failure", "#12 into main: By hand")[0], events.UNKNOWN)
+        self.assertEqual(events.decision("success", "#12 into main: Review record for abc says pass")[0], events.PASSED)
 
     def test_no_review_station_no_review_events_and_no_comments_read(self):
         gh = FakeGitHub([pull()], statuses={A: [status("2026-01-15T12:06:00Z", "success", "No code changed")]})

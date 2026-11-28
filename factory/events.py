@@ -4,29 +4,31 @@
     python3 -m factory.events export --pr 12                        # one pull request
     python3 -m factory.events check < events.jsonl                  # is every line a well-formed event?
 
-Nothing is stored anywhere new. A pull request, its commits, the checks that ran on them and the statuses the review
-gate set are already a dated, append-only history; `export` reads it and writes one event for each step. That means
-the record can be made again at any time, covers the time before it was first asked for, and needs no secret beyond a
-token that can read the repository.
+Nothing is stored anywhere new. A pull request, its commits and the statuses the review gate set are already a
+dated, append-only history; `export` reads it and writes one event for each step. That means the record can be made
+again at any time, covers the time before it was first asked for, and needs no secret beyond a token that can read
+the repository.
 
-Every event's `id` is worked out from GitHub's own id for the thing it is made from (a status, a pull request), which
-never changes, or, for the checks station, from the commit, the checks asked for, the moment and the result. What an
-event says happened (its type, time, change, station, outcome and reason) is
-fixed with it, and nothing that can be edited afterwards, such as a title, is carried. So exporting twice gives the
-same events with the same ids, and a reader that keeps one event for each id can be fed overlapping exports (the
-spec's "repeats are harmless").
+It covers the change itself (opened, new commits, merged, closed) and the review station. It does not yet cover the
+checks station: what GitHub keeps about check runs changes as they wait, start, are re-run and are copied, and a
+true record of "the tests failed once" needs more than a first version can promise. See docs/EVENTS.md.
 
-Events are written only from what has settled. Nothing from the last minute is written, and on a commit where a
-required check is waiting for a machine, nothing about its checks from the moment that run was made: GitHub changes
-a waiting run's start time when it really starts. The next export has what was held back.
+Every event's `id` is worked out from GitHub's own id for the thing it is made from (a status, a pull request),
+which never changes. What an event says happened (its type, time, change, station, outcome and reason) is fixed with
+it, and nothing that can be edited afterwards, such as a title, is carried. So exporting twice gives the same events
+with the same ids, and a reader that keeps one event for each id can be fed overlapping exports (the spec's "repeats
+are harmless").
+
+Nothing from the last minute is written: a second that is still going on has not shown everything that happens in
+it. The next export has it.
 
 Two things are read as they are at the time of the export, and so can differ between two exports of one event: who
-(`actor`), since an account can be renamed, and the link to the review record (`evidence`), since a comment can be
-deleted, after which the gate is named in its place. And a later export can hold fewer events than an earlier one:
-a force-push removes commits, and GitHub keeps only the last time a pull request was closed.
+(`actor`), since an account can be renamed, and the link (`evidence`), since a review record can be deleted, after
+which the gate is named in its place, and a repository can be renamed. And a later export can lack events an
+earlier one had: a force-push removes commits, and GitHub keeps only the last time a pull request was closed.
 
-The station names and the list of required checks are part of the ids. Change either in the factory file and the
-same history comes out as new events with new ids, beside the ones an earlier export gave.
+The review station's name is part of the ids. Rename it in the factory file and the same history comes out as new
+events with new ids, beside the ones an earlier export gave.
 
 What it cannot see, because GitHub does not keep it or the gate never said it:
   - when a commit was pushed. `change.updated` carries the commit's own date, which the author's machine set;
@@ -35,9 +37,6 @@ What it cannot see, because GitHub does not keep it or the gate never said it:
   - who an account is. A person's login may be driven by an agent.
 What the review station decided is read from the statuses the gate set. A status is not signed: anyone who can write to
 the repository can set one under the gate's name, and it will be read as the gate's.
-
-It reads the factory file from the default branch as it is now. Required check names that have changed since are not
-known for older pull requests.
 """
 from __future__ import annotations
 
@@ -50,7 +49,7 @@ import re
 import sys
 import urllib.error
 
-from . import config, review_gate, reviewer
+from . import config, review_gate
 
 SPEC = "factory.event/0.1"
 TYPES = ("change.opened", "change.updated", "change.closed", "station.entered", "station.finished", "change.merged",
@@ -71,7 +70,6 @@ def is_time(text) -> bool:
         return False
     return True
 MAX_COMMITS = 250                # GitHub lists at most this many commits of a pull request
-MAX_RUN_PAGES = 10               # check runs read for one commit, a hundred to a page
 MAX_STATUSES = 1000              # statuses read for one commit, newest first, under every name
 MAX_COMMENTS = 10_000            # comments read for one pull request
 SETTLE_SECONDS = 60              # nothing newer than this is written: see export
@@ -90,8 +88,19 @@ DECISIONS = (
 )
 
 
+SHARED = re.compile(r"#(\d+) into [^:]*: ")
+
+
+def shared_with(description: str | None) -> tuple[int | None, str]:
+    """(pull request number or None, the rest). When several open pull requests have the same head commit the gate
+    sets one status for the commit, for the one that is worst off, and names it at the front (review_gate.evaluate)."""
+    m = SHARED.match(description or "")
+    return (int(m.group(1)), (description or "")[m.end():]) if m else (None, description or "")
+
+
 def decision(state: str, description: str | None) -> tuple[str, str, str]:
-    """(kind, reason code, sentence) for one status the gate set."""
+    """(kind, reason code, sentence) for one status the gate set, with any pull request named at its front taken off."""
+    description = shared_with(description)[1]
     if state == "error" and (description or "").startswith("Gate could not decide"):
         return ERROR, "review.error", "The review gate could not decide"
     for start, kind, code, text in DECISIONS:
@@ -117,21 +126,14 @@ def actor_of(user: dict | None, automatic: dict | None = None) -> dict | None:
 class Writer:
     """Makes the events of one building, each with the fields every event carries.
 
-    An event's id comes from `source`. For the review station and the pull request itself that is GitHub's own id
-    for the thing the event is made from (a status, a pull request's number), with a word for which event of that
-    thing it is: those ids never change and are never reused, so two statuses in one second are two events. For the
-    checks station it is the commit, the station, the checks asked for, the moment and the result (see
-    testing_events for why a check run's id will not do). Either way the same history gives the same id in every
-    export. The pull request's number is part of it too, because two pull
+    An event's id comes from `source`: GitHub's own id for the thing the event is made from (a status, a pull
+    request's number), with a word for which event of that thing it is. Those ids never change and are never
+    reused, so two statuses in one second are two events, and the same history gives the same id in every export. The pull request's number is part of it too, because two pull
     requests can share a commit and each then has that commit's events."""
 
-    def __init__(self, factory: str, building: str, recorded: str, repo: str = ""):
+    def __init__(self, factory: str, building: str, recorded: str):
         self.base = {"spec": SPEC, "factory": factory, "building": building, "line": None}
-        self.recorded, self.events, self.repo = recorded, [], repo
-
-    def checks_page(self, sha: str) -> str | None:
-        """Where GitHub shows a commit's checks. One address for the commit, so it does not depend on which run."""
-        return f"https://github.com/{self.repo}/commit/{sha}/checks" if self.repo else None
+        self.recorded, self.events = recorded, []
 
     def add(self, type_: str, time: str | None, number: int, commit: str | None, source: tuple, **more) -> None:
         if not time:
@@ -143,87 +145,6 @@ class Writer:
         self.events.append(event)
 
 
-def check_runs(gh, sha: str) -> list[dict]:
-    """Every check run on the commit, earlier attempts included (GitHub's default leaves those out, and then a re-run
-    would rewrite what an earlier export said)."""
-    runs = []
-    for page in range(1, MAX_RUN_PAGES + 1):
-        batch = gh.get(f"commits/{sha}/check-runs?filter=all&per_page=100&page={page}").get("check_runs") or []
-        runs += batch
-        if len(batch) < 100:
-            break
-    return runs
-
-
-def testing_events(out: Writer, gh, number: int, sha: str, station: str, names: list[str]) -> None:
-    """The checks station's events for one commit, replayed in order of time from its check runs.
-
-    For each required name the run that stands is the one that started last, whichever workflow it came from: that
-    is the result GitHub shows for the name. `station.entered` when a required check starts while the station is
-    idle; `station.finished` each time every required name has a standing run and all of them have finished. A
-    re-run after the station finished is therefore a second entry and a second finish, and the first pair stays.
-
-    Check runs are not as simple as statuses, and three things GitHub does shape this:
-
-    - While a run waits for a machine it carries a start time (when it was made) that GitHub replaces when it really
-      starts, and keeps if it is cancelled first. So nothing is written from the moment the oldest waiting run was
-      made onwards: whatever that run turns into can only change the story from there. A later export has the rest.
-    - "Re-run failed jobs" makes a new check run, with a new id and the old times, for each job it does not run
-      again. Such a copy is left out (it says nothing new), and an event's id here is built from when it happened
-      and what it says, not from a run's id.
-    - A re-run is always made after the run it repeats. Within one second, runs are therefore taken in the order
-      GitHub made them, each one's start before its finish."""
-    if not names:
-        return
-    runs, told = [], set()
-    for r in sorted((r for r in check_runs(gh, sha) if r.get("name") in names and r.get("started_at") and r.get("id") is not None),
-                    key=lambda r: r["id"]):
-        # A copy made by "Re-run failed jobs": same name, same times, same result as a run GitHub made earlier.
-        story = (r["name"], r["started_at"], r.get("completed_at"), r.get("conclusion")) if r.get("status") == "completed" else r["id"]
-        if story not in told:
-            told.add(story)
-            runs.append(r)
-    waiting = [r["started_at"] for r in runs if r.get("status") not in ("in_progress", "completed")]
-    unsettled_from = min(waiting, default=None)
-    moments = []
-    for r in runs:
-        if r.get("status") not in ("in_progress", "completed"):
-            continue
-        moments.append((r["started_at"], r["id"], False, r))
-        if r["status"] == "completed" and r.get("completed_at"):
-            moments.append((max(r["started_at"], r["completed_at"]), r["id"], True, r))    # a finish dated before its start: at the start
-    checks, standing, done, busy = {"kind": "system", "id": "checks"}, {}, set(), False
-    asked = ("checks", sha, station, ",".join(sorted(names)))     # a different list of required checks asks a different question
-    said: dict = {}
-
-    def nth(*what) -> int:
-        """The station can finish, start again and finish the same way within one second: the second time is its own event."""
-        said[what] = said.get(what, 0) + 1
-        return said[what]
-    for when, ident, finished, r in sorted(moments, key=lambda m: m[:3]):
-        if unsettled_from is not None and when >= unsettled_from:
-            break
-        if not finished:
-            standing[r["name"]] = r
-            if not busy:
-                busy = True
-                out.add("station.entered", when, number, sha, (*asked, "entered", when, nth("entered", when)), station=station, actor=checks, evidence=out.checks_page(sha))
-            continue
-        done.add(ident)
-        if standing.get(r["name"]) is not r:
-            continue                 # an attempt that a later one has already replaced
-        current = list(standing.values())
-        if not busy or {c["name"] for c in current} != set(names) or any(c["id"] not in done for c in current):
-            continue
-        busy = False
-        failed = sorted({c["name"] for c in current if c.get("conclusion") not in reviewer.PASSED_CONCLUSIONS})
-        outcome = "failed" if failed else "pass"
-        out.add("station.finished", when, number, sha, (*asked, "finished", when, outcome, *failed, nth("finished", when, outcome, *failed)), station=station, outcome=outcome,
-                actor=checks, evidence=out.checks_page(sha),
-                reason={"code": "checks.failed", "text": "A required check did not pass"} if failed else None,
-                data={"factory": {"checks": sorted(names), **({"failed": failed} if failed else {})}})
-
-
 def review_events(out: Writer, gh, number: int, sha: str, station: str, context: str, records: list[dict], automatic) -> None:
     """The review station's events for one commit, from the statuses the gate set on it, in the order GitHub gave
     them ids. The gate sets a status each time it runs, so a run of statuses that say the same thing is one event."""
@@ -231,6 +152,11 @@ def review_events(out: Writer, gh, number: int, sha: str, station: str, context:
                 if s.get("context") == context and s.get("created_at") and s.get("id") is not None]
     last, waiting_for_person = None, False
     for s in sorted(statuses, key=lambda s: (s["created_at"], s["id"])):
+        about = shared_with(s.get("description"))[0]
+        if about is not None and about != number and s.get("state") != "success":
+            # The commit is the head of several open pull requests, and this status speaks for another of them.
+            # It says nothing about this one, which may be in a better state.
+            continue
         kind, code, text = decision(s.get("state") or "", s.get("description"))
         # Words that are not the gate's are only "the same thing" when the state is the same too: a failure and then
         # a success in unknown words are two events, and the second is the one that lets the pull request merge.
@@ -276,8 +202,6 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
     number, opened = pr["number"], pr.get("created_at")
     review = cfg.get("review") or {}
     automatic, review_station = review.get("automatic"), str(review["station"]) if review.get("station") else None
-    checks = [(str(s["station"]), [n for n in (s["require"] if isinstance(s.get("require"), list) else []) if isinstance(n, str) and n])
-              for s in cfg["raw"].get("intake") or [] if isinstance(s, dict) and s.get("uses") == "checks" and s.get("station")]
     commits = gh.pages(f"pulls/{number}/commits", MAX_COMMITS)
     dated = [(c["sha"], ((c.get("commit") or {}).get("committer") or {}).get("date")) for c in commits if c.get("sha")]
     link = pr.get("html_url") if isinstance(pr.get("html_url"), str) else None
@@ -295,10 +219,8 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
             if marker:
                 records.append({**c, "marker": marker})
     head = (pr.get("head") or {}).get("sha")
-    for sha in dict.fromkeys([sha for sha, _ in dated] + ([head] if head else [])):
-        for station, names in checks:
-            testing_events(out, gh, number, sha, station, names)
-        if review_station:
+    if review_station:
+        for sha in dict.fromkeys([sha for sha, _ in dated] + ([head] if head else [])):
             review_events(out, gh, number, sha, review_station, context, records, automatic)
     if pr.get("merged_at"):
         out.add("change.merged", pr["merged_at"], number, head, ("pull request", number, "merged"), actor=actor_of(pr.get("merged_by")),
@@ -322,7 +244,7 @@ def export(gh, cfg: dict, numbers: list[int] | None = None, limit: int = 30, sin
     building = raw["building"] if isinstance(raw.get("building"), str) and raw["building"] else gh.repo
     factory = raw["factory"] if isinstance(raw.get("factory"), str) and raw["factory"] else gh.repo.split("/")[0]
     branch = raw["branch"] if isinstance(raw.get("branch"), str) and raw["branch"] else None
-    out = Writer(factory, building, recorded, gh.repo)
+    out = Writer(factory, building, recorded)
     if numbers:
         prs = [gh.get(f"pulls/{n}") for n in dict.fromkeys(numbers)]
     else:
