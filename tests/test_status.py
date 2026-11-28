@@ -75,7 +75,7 @@ class InShort(unittest.TestCase):
             got = status.one_line(mark + "Tidy docs", 200)
             self.assertEqual(got, "Tidy docs", repr(mark))
             self.assertFalse(unicodedata.category(got[0]).startswith("M"))
-        self.assertEqual(status.one_line("a\u2800\u3164\ufe0f\u00adb\u202e\u200b\u17b5\u180b", 200), "ab")
+        self.assertEqual(status.one_line("a\u2800\u3164\ufe0f\u00adb\u202e\u200b\u17b5\u180b\u17d8\ufdfd", 200), "ab")
         self.assertEqual(status.one_line("\u0338", 200), "")
 
 
@@ -113,6 +113,10 @@ class Fits(unittest.TestCase):
         words = "one two " + "three" * 40 + " four"
         rows = status.their_lines(status.TITLE, words)
         self.assertEqual("".join(r.split(": ", 1)[1] if i == 0 else r.split("| ", 1)[1] for i, r in enumerate(rows)).replace(" ", ""), words.replace(" ", ""))
+        # Marks are kept with their letters when a long word is cut, and one with no letter is shown on a placeholder.
+        for words in ("e\u0301" * 100, "\u0e01\u0e34" * 60, "a \u0301b"):
+            got = "".join(r.split(": ", 1)[1] if i == 0 else r.split("| ", 1)[1] for i, r in enumerate(status.their_lines(status.TITLE, words)))
+            self.assertEqual(got.replace(" ", "").replace(status.DOTTED_CIRCLE, ""), words.replace(" ", ""), words)
         self.assertEqual(status.their_lines(status.TITLE, ""), ["      title: "])
         self.assertEqual(status.their_lines(status.TITLE, "short"), ["      title: short"])
         # A row never opens with a mark that would be drawn over its own start.
