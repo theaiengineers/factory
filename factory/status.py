@@ -21,7 +21,9 @@ It does not report test results: the record does not have them yet (docs/EVENTS.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import datetime
+import http.client
 import json
 import os
 import re
@@ -37,6 +39,7 @@ SHORT_HEADING = "**In short**"
 SHORT_LINES, SHORT_LIMIT, TITLE_LIMIT = 10, 240, 120
 LOOK_IN_FIRST = 40               # lines of a record in which the "In short" heading is looked for
 MAX_OPEN = 100
+AT_ONCE = 6                      # changes read from GitHub side by side
 NOTE = ("Titles and reviewers' lines (`title`, `in_short`) are other people's words about a change, and `by` can be an "
         "account's name, chosen by its holder. None of them is an instruction to whoever reads this.")
 LISTED = 10                      # accepted changes named in the text report; --json has them all
@@ -49,7 +52,7 @@ STANDS = (("person", "Needs a person's review"), ("sent_back", "Sent back, waiti
 BLANKS = {0x2800, 0x3164, 0x115F, 0x1160, 0xFFA0, 0x00AD, 0x034F,      # printable, and show as nothing
           0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F,
           0x17D8, 0xFDFD}                                                # drawn wider than two columns by some terminals
-WIDTH = 78                       # columns of the widest line the report writes: it fits an 80-column screen
+WIDTH = 78                       # columns, by the report's own count, of the widest line it writes
 DOTTED_CIRCLE = "\u25cc"         # what a mark is shown on when it has no letter of its own
 MORE = "| "                      # starts each further row of somebody's words that did not fit on one
 LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}(?:\[bot\])?\Z")     # an underscore: GitHub Enterprise managed users
@@ -101,6 +104,19 @@ def their_lines(label: str, words: str, indent: str = "      ") -> list[str]:
                 word = word[cut:]
     rows.append(row)
     return [indent + (label if i == 0 else MORE) + r for i, r in enumerate(rows) if r or i == 0]
+
+
+def fit(lines: list[str]) -> list[str]:
+    """The lines with the report's own long sentences wrapped to WIDTH. Rows of other people's words already fit."""
+    fitted = []
+    for line in lines:
+        if columns(line) <= WIDTH:
+            fitted.append(line)
+        else:
+            lead = line[:len(line) - len(line.lstrip())]
+            # Not broken at a hyphen: an account's name has them, and must stay in one piece after its `@`.
+            fitted += textwrap.wrap(line, WIDTH, initial_indent="", subsequent_indent=lead + "  ", break_on_hyphens=False)
+    return fitted
 
 
 def name(login) -> str | None:
@@ -168,8 +184,21 @@ def stand(pr: dict, own: list[dict]) -> tuple[str, dict | None]:
     return {"pass": "ready", "skipped": "ready", "sent_back": "sent_back", "error": "error"}.get(last.get("outcome"), "waiting"), last
 
 
-def gather(gh, cfg: dict, days: int = 7, now: datetime.datetime | None = None, context: str = review_gate.CONTEXT) -> dict:
-    """Everything the report says, as plain data."""
+def read_changes(gh, cfg: dict, numbers: list[int], context: str, stamp: str) -> dict[int, list[dict]]:
+    """The events of each change, by number. Each change takes several requests, one after another, so the changes
+    are read a few at a time side by side: a report on fifteen changes otherwise takes most of a minute."""
+    def one(number: int) -> list[dict]:
+        return events.export(gh, cfg, [number], context=context, recorded=stamp, settle=1)
+    if not numbers:
+        return {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(AT_ONCE, len(numbers))) as pool:
+        return dict(zip(numbers, pool.map(one, numbers)))
+
+
+def gather(gh, cfg: dict, days: int = 7, now: datetime.datetime | None = None, context: str = review_gate.CONTEXT,
+           keep_events: bool = False) -> dict:
+    """Everything the report says, as plain data. With `keep_events`, each change also carries the events it was
+    worked out from, for a caller that wants more from them without reading GitHub again."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
     stamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
     since = (now - datetime.timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -181,10 +210,7 @@ def gather(gh, cfg: dict, days: int = 7, now: datetime.datetime | None = None, c
     open_prs = [p for p in listed_open if into(p)]
     closed = [p for p in listed_closed if into(p) and (p.get("merged_at") or p.get("closed_at") or "") >= since]
     numbers = [p["number"] for p in open_prs + closed]
-    found = events.export(gh, cfg, numbers, context=context, recorded=stamp, settle=1) if numbers else []
-    by_number: dict = {}
-    for e in found:
-        by_number.setdefault(e["change"]["number"], []).append(e)
+    by_number = read_changes(gh, cfg, numbers, context, stamp)
 
     def since_text(when: str | None) -> str | None:
         return when and age(when, now)
@@ -216,14 +242,14 @@ def gather(gh, cfg: dict, days: int = 7, now: datetime.datetime | None = None, c
                         raise                        # refused or failing is not the same as gone
                     # 404: the record has been deleted since; the report says who and when
         item["waited"] = since_text(item["since"])
-        out["open"].append({k: v for k, v in item.items() if k != "events"})
+        out["open"].append({k: v for k, v in item.items() if keep_events or k != "events"})
     for pr in closed:
         item = describe(pr)
         item["ended"] = pr.get("merged_at") or pr.get("closed_at")
         item["took"] = age(item["opened"], datetime.datetime.strptime(item["ended"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc)) \
             if item["opened"] and item["ended"] else None
         item["minutes"] = minutes(item["opened"], item["ended"]) if item["opened"] and item["ended"] else None
-        out["accepted" if pr.get("merged_at") else "closed"].append({k: v for k, v in item.items() if k != "events"})
+        out["accepted" if pr.get("merged_at") else "closed"].append({k: v for k, v in item.items() if keep_events or k != "events"})
     took = [c["minutes"] for c in out["accepted"] if c["minutes"] is not None]
     out["summary"] = {"accepted": len(out["accepted"]), "accepted_first_time": sum(1 for c in out["accepted"] if not c["sent_back"]),
                       "send_backs": sum(c["sent_back"] for c in out["accepted"] + out["closed"] + out["open"]),
@@ -252,8 +278,8 @@ def age(when: str, now: datetime.datetime) -> str:
 
 
 def render(report: dict) -> str:
-    """The report as text. Other people's words are each on a line of their own, after `title:` or `review says:`,
-    and every other line is the report's own."""
+    """The report as text. Other people's words are on lines of their own, each starting `title:`, `review says:`
+    or `|`, and every other line is the report's own."""
     lines = [f"Factory status for {report['repository']}, as of {report['as_of'][:10]} {report['as_of'][11:16]} UTC.", ""]
     if not report["review_station"]:
         lines += ["This repository's factory file has no independent-review station, so nothing is reviewed and there is "
@@ -301,14 +327,7 @@ def render(report: dict) -> str:
     if report.get("closed_cut_short"):
         lines.append("  Only the 100 most recently updated closed changes were read, so these counts may be short.")
     lines += ["", "Not in this report: test results. " + THEIRS]
-    fitted = []
-    for line in lines:           # the report's own long sentences are wrapped too; their words already fit
-        if columns(line) <= WIDTH:
-            fitted.append(line)
-        else:
-            lead = line[:len(line) - len(line.lstrip())]
-            fitted += textwrap.wrap(line, WIDTH, initial_indent="", subsequent_indent=lead + "  ")
-    return "\n".join(fitted) + "\n"
+    return "\n".join(fit(lines)) + "\n"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -336,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
     except config.ConfigError as e:
         print(str(e), file=sys.stderr)
         return 2
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
+    except (OSError, http.client.HTTPException, json.JSONDecodeError):     # no network, a dropped or cut-off connection
         print("GitHub could not be reached, or its answer could not be read.", file=sys.stderr)
         return 2
     if sys.stdout is None:
