@@ -18,6 +18,8 @@ The record of every step. One command writes out what happened to each change (o
 
 How the factory is getting on. One command says, in plain words, what is waiting for review, what was sent back and why, and what was accepted lately; an agent can run it to answer the question. See [docs/STATUS.md](docs/STATUS.md).
 
+Asking from an agent. A small connector (an MCP server that runs on your own machine and only reads) lets your agent answer "how's the factory getting on?", tell the story of one change, and say what was sent back and why. See [docs/CONNECTOR.md](docs/CONNECTOR.md).
+
 ## Setting it up
 
 Most people will set this up with an agent. Two guides are written for that, and a person can follow them too:
