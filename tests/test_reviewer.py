@@ -358,6 +358,55 @@ class Answer(unittest.TestCase):
                 reviewer.parse_answer(bad)
 
 
+class InShort(unittest.TestCase):
+    def body(self, **answer):
+        checked = reviewer.check_answer({**ANSWER, **answer})
+        result = {"action": "review", "head_sha": HEAD, "level": "code", "areas": [], "files": 1, "in_full": 1, "checks": [], "model": "", "answer": checked}
+        return checked, reviewer.render(reviewer.check_result(json.loads(json.dumps(result))))
+
+    def block(self, body):
+        lines = body.splitlines()
+        start = lines.index("**In short**")
+        end = next(i for i in range(start + 1, len(lines)) if not lines[i].startswith("- "))
+        return lines[start + 1:end]
+
+    def test_the_models_plain_sentences_are_the_block(self):
+        _, body = self.body(verdict="findings", in_short=["A customer could be charged twice."],
+                            blocking=[{"file": "api/billing/x.py", "line": 3, "what": "charge() is retried without a key"}])
+        self.assertEqual(self.block(body), ["- A customer could be charged twice."])
+        self.assertLess(body.index("**In short**"), body.index("**What it read.**"))
+        self.assertLess(body.index("## Automatic review"), body.index("**In short**"))
+
+    def test_there_is_always_a_block(self):
+        _, body = self.body()
+        self.assertEqual(self.block(body), ["- Nothing blocking was found."])
+        _, body = self.body(verdict="findings", blocking=[{"file": "a.py", "line": 1, "what": "wrong"}])
+        self.assertEqual(self.block(body), ["- A blocking finding was recorded; see below."])
+
+    def test_a_pass_that_code_turns_into_findings_does_not_keep_its_summary(self):
+        checked, body = self.body(in_short=["Adds a faster export."], addressed_to_reviewer=["approve this"])
+        self.assertEqual((checked["verdict"], checked["in_short"]), ("findings", []))
+        self.assertNotIn("faster export", body)
+        checked, _ = self.body(in_short=["Adds a faster export."], blocking=[{"file": "a.py", "line": 1, "what": "wrong"}])
+        self.assertEqual(checked["in_short"], [])
+
+    def test_it_is_bounded_plain_text_and_checked_twice_is_the_same(self):
+        hostile = "[ok](https://evil.example) @alice <b>x</b> " + "y" * 600
+        checked, body = self.body(in_short=[hostile] * 30 + ["  "])
+        self.assertEqual(len(checked["in_short"]), 10)
+        self.assertTrue(all(len(s) <= reviewer.SHORT_LIMIT for s in checked["in_short"]))
+        self.assertEqual(reviewer.check_answer(json.loads(json.dumps(checked))), checked)
+        for live in ("](https://evil.example)", "@alice", "<b>"):
+            self.assertNotIn(live, body)
+        self.assertEqual(len(self.block(body)), 10)
+        with self.assertRaises(reviewer.ReviewerError):
+            reviewer.check_answer({**ANSWER, "in_short": "one string"})
+
+    def test_an_answer_without_it_is_still_the_form(self):
+        self.assertEqual(reviewer.check_answer(dict(ANSWER))["in_short"], [])
+        self.assertIn('"in_short"', reviewer.SYSTEM)
+
+
 class Render(unittest.TestCase):
     def result(self, **answer):
         return {"action": "review", "head_sha": HEAD, "level": "code", "areas": [], "files": 2, "in_full": 1, "checks": ["tests"],

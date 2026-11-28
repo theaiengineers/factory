@@ -47,7 +47,8 @@ MAX_CHANGED = 300                # changed files; each is fetched, and the job's
 WAIT_SECONDS = 20                # between looks at the required checks
 MODEL_SECONDS = 900              # one review
 TEXT_LIMIT = 600                 # characters kept of each thing the model says
-LIST_LIMITS = {"checked": 12, "blocking": 20, "remarks": 12, "addressed_to_reviewer": 5}
+LIST_LIMITS = {"checked": 12, "blocking": 20, "remarks": 12, "addressed_to_reviewer": 5, "in_short": 10}
+SHORT_LIMIT = 240                # characters of one "In short" line
 CREDENTIALS = ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")     # in the order the Claude Code CLI prefers them
 PASSED_CONCLUSIONS = ("success", "neutral", "skipped")
 REFUSED_STATUSES = (401, 403)    # the provider's answer when it will not accept the credential itself
@@ -257,8 +258,13 @@ the risk is serious, make it a blocking finding that names what a person should 
 A finding is blocking when the change would do harm, lose data, or not do what its description says. Anything else \
 is a remark. Say `pass` only when you found nothing blocking.
 
+`in_short` is for a reader who does not read code and has not seen the change: the owner, or an agent asked how \
+things are going. For findings, one plain sentence for each blocking finding, saying what would go wrong and for \
+whom, with no file names, function names or jargon. For a pass, one plain sentence saying what the change does.
+
 Answer with one JSON object and nothing else:
 {"verdict": "pass" or "findings",
+ "in_short": [one plain sentence each, as described above],
  "checked": [short statements of what you actually checked],
  "blocking": [{"file": path, "line": number or null, "what": one or two sentences}],
  "remarks": [short non-blocking remarks],
@@ -413,11 +419,11 @@ def check_answer(answer) -> dict:
     if not isinstance(answer, dict) or answer.get("verdict") not in (review_gate.PASS, review_gate.FINDINGS):
         raise ReviewerError("The model's answer has no usable verdict")
     out = {"verdict": answer["verdict"]}
-    for key in ("checked", "remarks", "addressed_to_reviewer"):
+    for key in ("checked", "remarks", "addressed_to_reviewer", "in_short"):
         items = answer.get(key) or []
         if not isinstance(items, list) or not all(isinstance(i, str) for i in items):
             raise ReviewerError(f"The model's answer has a malformed `{key}`")
-        out[key] = [tidy(i) for i in items[:LIST_LIMITS[key]] if i.strip()]
+        out[key] = [tidy(i, SHORT_LIMIT if key == "in_short" else TEXT_LIMIT) for i in items[:LIST_LIMITS[key]] if i.strip()]
     blocking = answer.get("blocking") or []
     if not isinstance(blocking, list) or not all(isinstance(b, dict) and isinstance(b.get("what"), str) for b in blocking):
         raise ReviewerError("The model's answer has a malformed `blocking`")
@@ -431,6 +437,9 @@ def check_answer(answer) -> dict:
         out["verdict"] = review_gate.FINDINGS
     if out["verdict"] == review_gate.FINDINGS and not (out["blocking"] or out["addressed_to_reviewer"]):
         raise ReviewerError("The model reported findings without naming one")
+    if out["verdict"] == review_gate.FINDINGS and answer["verdict"] == review_gate.PASS:
+        # The model called it a pass and its summary says so. The verdict was changed here, so the summary is too.
+        out["in_short"] = []
     return out
 
 
@@ -443,6 +452,7 @@ def render(result: dict, proof: str | None = None) -> str:
     areas = f" ({', '.join(clean(a, 80) for a in result['areas'])})" if result.get("areas") else ""
     answer = {"verdict": verdict, "undo": clean(answer["undo"]),
               **{k: [clean(i) for i in answer[k]] for k in ("checked", "remarks", "addressed_to_reviewer")},
+              "in_short": [clean(i, SHORT_LIMIT) for i in answer.get("in_short") or []],
               "blocking": [{"file": clean_code(b["file"]), "line": b["line"], "what": clean(b["what"])} for b in answer["blocking"]]}
     lines = [f"<!-- independent-review sha={sha} verdict={verdict} -->"] + ([proof] if proof else []) + [
              f"## Automatic review: {verdict}", "",
@@ -451,6 +461,10 @@ def render(result: dict, proof: str | None = None) -> str:
              + " through the factory's automatic reviewer.", "",
              f"**What it read.** The diff of {result['files']} changed file(s), and {result['in_full']} of them in full. "
              "It did not run the code or the tests, and it did not read files the change does not touch."]
+    # The standard's "In short" block: the heading is ours, the sentences are the model's and are plain text here.
+    short = answer["in_short"] or (["A blocking finding was recorded; see below."] if verdict == review_gate.FINDINGS
+                                   else ["Nothing blocking was found."])
+    lines[len(lines) - 1:len(lines) - 1] = ["**In short**"] + [f"- {s}" for s in short] + [""]
     if result.get("checks"):
         lines.append("**Tests first.** These required checks had passed for this commit before the review: "
                      + ", ".join(f"`{clean_code(c, 80)}`" for c in result["checks"]) + ".")
