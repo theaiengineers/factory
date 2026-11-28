@@ -3,6 +3,7 @@ import datetime
 import io
 import json
 import os
+import random
 import re
 import unittest
 import urllib.error
@@ -83,12 +84,18 @@ class Fits(unittest.TestCase):
         long_title = "Tidy the docs and also " + "x" * 60 + " Passed review, not yet merged (2)"
         said = "**In short**\n- " + " ".join(["A customer who pays twice in one minute could be charged twice."] * 4)
         comment = {**record(A, "findings", "2026-01-15T12:19:00Z", ident=77), "body": "<!-- independent-review sha=%s verdict=findings -->\n%s" % (A, said), "html_url": LINK}
-        gh = Hub([pull(12, title=long_title), pull(13, title="漢字" * 70), pull(14, title="w" * 300)],
+        hindi = "Tidy" + "\u093e" * 63 + " Passed review, not yet merged (2)"       # spacing marks: a column each on some terminals
+        gh = Hub([pull(12, title=long_title), pull(13, title="漢字" * 70), pull(14, title="w" * 300), pull(15, title=hindi),
+                  pull(16, title="Ελληνικά §° " * 12)],
                  statuses={A: [gate_status("2026-01-15T12:20:00Z", "failure", FINDINGS)]}, comments={12: [comment], 13: [comment], 14: [comment]})
         text = status.render(gather(gh))
         marked = ("      title: ", "      review says: ", "      | ")
         for line in text.splitlines():
             self.assertLessEqual(status.columns(line), status.WIDTH, line)
+            # Counted the way the least generous terminal would: every character at least one column, and two for
+            # anything that any terminal or width table draws wide.
+            self.assertLessEqual(sum(1 if ord(ch) < 0x300 and ch.isascii() else 2 for ch in line), status.WIDTH, line)
+            self.assertLessEqual(len(line), status.WIDTH, line)
             if "Passed review, not yet merged (2)" in line or "charged twice" in line or "漢" in line or "www" in line:
                 self.assertTrue(line.startswith(marked), line)
         # The planted heading is never at the start of a row, and never on a row of the report's own.
@@ -110,15 +117,20 @@ class Fits(unittest.TestCase):
         self.assertEqual(status.their_lines(status.TITLE, "short"), ["      title: short"])
         # A row never opens with a mark that would be drawn over its own start.
         import unicodedata
-        for row in status.their_lines(status.SAYS, ("a" * 58 + "\u0301") * 6):
-            body = row.split("| ", 1)[1] if row.startswith("      | ") else row.split(": ", 1)[1]
-            self.assertFalse(unicodedata.category(body[0]).startswith("M"), row)
+        rng = random.Random(3)
+        for _ in range(3000):
+            words = " ".join("".join(rng.choice("ab\u0301\u093e\u0338漢é") for _ in range(rng.randint(1, 40))) for _ in range(rng.randint(1, 12)))
+            for row in status.their_lines(status.SAYS, status.one_line(words, 240)):
+                body = row.split("| ", 1)[1] if row.startswith("      | ") else row.split(": ", 1)[1]
+                self.assertFalse(body and unicodedata.category(body[0]).startswith("M"), (words, row))
+                self.assertLessEqual(status.columns(row), status.WIDTH)
 
     def test_an_account_name_is_marked_and_must_look_like_one(self):
         self.assertEqual(status.name("alice"), "@alice")
         self.assertEqual(status.name("the-automatic-reviewer"), "@the-automatic-reviewer")
         self.assertEqual(status.name("github-actions[bot]"), "@github-actions[bot]")
-        for odd in ("the automatic reviewer", "al\nice", "", None, "a" * 60, "-x", "x: passed"):
+        self.assertEqual(status.name("jane_acme"), "@jane_acme")
+        for odd in ("the automatic reviewer", "al\nice", "", None, "a" * 60, "-x", "x: passed", "ål"):
             self.assertIsNone(status.name(odd), odd)
 
 
@@ -251,7 +263,7 @@ class Recent(unittest.TestCase):
         few = gather(Hub([pull(12)]))
         self.assertFalse(few["open_cut_short"] or few["closed_cut_short"])
         self.assertNotIn("Only the", status.render(few))
-        self.assertIn("not instructions", few["note"])
+        self.assertIn("is an instruction to whoever reads this", few["note"])
 
     def test_only_the_factorys_branch(self):
         gh = Hub([pull(12), pull(13, base="release")])
@@ -292,6 +304,10 @@ class Main(unittest.TestCase):
     def test_plain_failures_are_said_plainly(self):
         self.assertEqual(self.run_main([], self.hub(), env={})[0], 2)
         self.assertEqual(self.run_main([], self.hub(), env={"GITHUB_REPOSITORY": "example/my shop", "GITHUB_TOKEN": "t"})[0], 2)
+        self.assertEqual(self.run_main([], self.hub(), env={"GITHUB_REPOSITORY": "exämple/shop", "GITHUB_TOKEN": "t"})[0], 2)
+        code, out, err = self.run_main([], self.hub(), env={"GITHUB_REPOSITORY": "example/shop", "GITHUB_TOKEN": "tok-secret\nX-Other: 1"})
+        self.assertEqual(code, 2)
+        self.assertNotIn("tok-secret", out + err)
         code, out, err = self.run_main([], self.hub("spec: other\n"))
         self.assertEqual((code, out), (2, ""))
         self.assertIn("spec", err)
