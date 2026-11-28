@@ -199,6 +199,8 @@ Tell the owner, in plain words:
 
 **Turning it off.** Remove `independent-review` from the required checks, then remove the workflow. Do it in that order, or merging is blocked in between. Both are the owner's decision.
 
+**Seeing what happened.** `python3 -m factory.events export` writes out the record of each change (opened, reviewed, sent back, merged) from what GitHub already holds; test results are not in it yet. See [the record of every step](EVENTS.md).
+
 ## What stage 1 does not do
 
 - It does not do the review. It checks that one was recorded for the exact commit. The [automatic reviewer](AUTOMATIC_REVIEWER.md) is the optional station that does.
