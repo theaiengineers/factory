@@ -45,7 +45,7 @@ def status(when, state, description, context="independent-review", ident=1, crea
 
 def record(sha, verdict, when, login="alice", kind="User", ident=1, association="COLLABORATOR"):
     return {"id": ident, "created_at": when, "user": {"login": login, "type": kind}, "html_url": f"https://github.test/c/{ident}",
-            "author_association": association if kind == "User" else "NONE",
+            "author_association": association,
             "body": f"<!-- independent-review sha={sha} verdict={verdict} -->\nwords"}
 
 
@@ -287,24 +287,23 @@ class OneChange(unittest.TestCase):
                                comments={12: [record("c" * 40, "pass", "2026-01-15T12:11:00Z")]})
         self.assertEqual(outcomes(elsewhere), [("b", "station.finished", "pass")])
 
-    def test_a_passer_bys_record_does_not_count(self):
-        # Anyone can comment. A record from outside the repository neither brings a commit in nor names a reviewer.
+    def test_the_record_does_not_depend_on_who_reads_it(self):
+        # GitHub reports a commenter's standing differently to different readers (a private member of the
+        # organisation reads as MEMBER to another member and as CONTRIBUTOR to everyone else), and it changes when
+        # they leave. The same comments must give the same record whatever that field says.
         said = {A: [status("2026-01-15T12:16:00Z", "failure", f"Review of {A[:7]} has open findings: fix")],
                 B: [status("2026-01-15T12:40:00Z", "success", f"Review record for {B[:7]} says pass", ident=2)]}
         own = {12: [commit(A, "2026-01-15T12:00:00Z"), commit(B, "2026-01-15T12:30:00Z")]}
-        for association in ("NONE", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", None):
-            outside = [record(A, "findings", "2026-01-15T12:15:00Z", login="mallory", association=association),
-                       record(B, "pass", "2026-01-15T12:39:00Z", login="mallory", association=association, ident=2)]
-            found = [e for e in export(FakeGitHub([pull(12, head=B)], commits=own, statuses=said, comments={12: outside}), numbers=[12]) if e.get("station") == "qa"]
-            self.assertEqual([(e["change"]["commit"][:1], e.get("outcome"), e["actor"]["id"]) for e in found], [("b", "pass", "review gate")], association)
-        for association in ("OWNER", "MEMBER", "COLLABORATOR"):
-            inside = [record(A, "findings", "2026-01-15T12:15:00Z", association=association)]
-            found = [e for e in export(FakeGitHub([pull(12, head=B)], commits=own, statuses=said, comments={12: inside}), numbers=[12]) if e.get("station") == "qa"]
-            self.assertEqual([(e["change"]["commit"][:1], e.get("outcome")) for e in found], [("a", "sent_back"), ("b", "pass")], association)
-        # A bot is believed only when it is the automatic reviewer the factory file names.
-        other_bot = [record(A, "findings", "2026-01-15T12:15:00Z", login="other[bot]", kind="Bot")]
-        found = export(FakeGitHub([pull(12, head=B)], commits=own, statuses=said, comments={12: other_bot}), numbers=[12])
-        self.assertEqual([e.get("outcome") for e in found if e.get("station") == "qa"], ["pass"])
+
+        def as_read_by(association):
+            comments = [record(A, "findings", "2026-01-15T12:15:00Z", association=association),
+                        record(B, "pass", "2026-01-15T12:39:00Z", association=association, ident=2)]
+            return export(FakeGitHub([pull(12, head=B)], commits=own, statuses=said, comments={12: comments}), numbers=[12])
+        member = as_read_by("MEMBER")
+        self.assertEqual([(e.get("outcome"), e["actor"]["id"]) for e in member if e["type"] == "station.finished"],
+                         [("sent_back", "alice"), ("pass", "alice")])
+        for association in ("CONTRIBUTOR", "NONE", "OWNER", "COLLABORATOR", None):
+            self.assertEqual(as_read_by(association), member, association)
 
     def test_a_stack_whose_lower_pull_request_closed_unmerged_or_came_from_a_fork(self):
         # Nothing here depends on GitHub listing the other pull request: #13 has no review of A, so A is not read for it.

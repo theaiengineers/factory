@@ -36,8 +36,8 @@ What it cannot see, because GitHub does not keep it or the gate never said it:
   - commits that a force-push removed from a pull request, and whatever was decided about them;
   - a review of a commit that was no longer the head when the gate next ran: the gate set no status for it;
   - which commit was a pull request's head at a given time: so the gate's statuses are read only on the commit
-    that is its head now and on commits a review record posted on it names. An earlier head nobody reviewed
-    leaves no review events;
+    that is its head now and on commits a review record posted on it (by anyone) names. An earlier head nobody
+    reviewed leaves no review events;
   - who an account is. A person's login may be driven by an agent.
 What the review station decided is read from the statuses the gate set. A status is not signed: anyone who can write to
 the repository can set one under the gate's name, and it will be read as the gate's.
@@ -150,18 +150,6 @@ class Writer:
         self.events.append(event)
 
 
-def may_review(comment: dict, automatic: dict | None) -> bool:
-    """Whether a review record is from an account that belongs to the repository: its owner, a member of its
-    organisation, a collaborator, or the automatic reviewer the factory file names. Anyone can comment on a public
-    pull request, and a record decides which commits are read for it and who is named as the reviewer, so a
-    passer-by's does not count. (The gate is stricter: it looks up what the account may do. That lookup is not
-    repeated here, so a record the gate would not count can still be read.)"""
-    user = comment.get("user") or {}
-    if automatic and user.get("login") == automatic.get("account") and user.get("type") == "Bot":
-        return True
-    return comment.get("author_association") in ("OWNER", "MEMBER", "COLLABORATOR")
-
-
 def lifetime(pr: dict) -> tuple[str, str | None]:
     """(opened, ended): `ended` is when it merged or was last closed, or None while it is open."""
     return pr.get("created_at") or "", pr.get("merged_at") or (pr.get("closed_at") if pr.get("state") == "closed" else None)
@@ -244,7 +232,9 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
     if review_station:
         for c in gh.pages(f"issues/{number}/comments", MAX_COMMENTS):
             marker = review_gate.parse_marker(c.get("body"))
-            if marker and may_review(c, automatic):
+            if marker:
+                # Whoever posted it. Whether an account "belongs" is not asked: GitHub answers that differently
+                # for different readers and at different times, and the record must not depend on who exports it.
                 records.append({**c, "marker": marker})
     head = (pr.get("head") or {}).get("sha")
     if review_station:
@@ -252,8 +242,9 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
         # which commit was whose head when. A commit on this pull request's list may only ever have been the head of
         # another one (one branch built on another). So the statuses of a commit are read only when the commit is
         # known to have been this pull request's head: it is the head now, or a review record posted on this pull
-        # request names it. A comment belongs to one pull request, so that link is certain; nobody reviews, on this
-        # pull request, a commit that was never its head.
+        # request names it. A comment belongs to one pull request, so that link is certain; a reviewer does not
+        # review, on this pull request, a commit that was never its head. (Anyone can post such a comment, though:
+        # see "A review posted on the wrong pull request" in docs/EVENTS.md.)
         listed = [sha for sha, _ in dated] + ([head] if head else [])
         reviewed = {c["marker"][0] for c in records}
         ended = lifetime(pr)[1]
