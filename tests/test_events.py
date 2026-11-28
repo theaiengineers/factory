@@ -79,6 +79,9 @@ class FakeGitHub:
             return self.commits.get(int(path.split("/")[1]), [commit(A, "2026-01-15T12:00:00Z")])
         if path.endswith("/statuses"):
             return self.statuses.get(path.split("/")[1], [])
+        if path.startswith("commits/") and path.endswith("/pulls"):
+            sha = path.split("/")[1]
+            return [p for n, p in self.prs.items() if sha in [c["sha"] for c in self.commits.get(n, [commit(A, "2026-01-15T12:00:00Z")])]]
         if path.endswith("/comments"):
             return self.comments.get(int(path.split("/")[1]), [])
         raise AssertionError(path)
@@ -251,6 +254,37 @@ class OneChange(unittest.TestCase):
         merged = pull(12, state="closed", merged_at="2026-01-15T12:16:00Z", closed_at="2026-01-15T12:16:00Z")
         self.assertEqual([(e["type"], e.get("outcome")) for e in export(FakeGitHub([merged], statuses=said), numbers=[12]) if e.get("station") == "qa"],
                          [("station.entered", None), ("station.finished", "sent_back")])
+
+    def test_one_branch_built_on_another_both_open(self):
+        # #13 is built on #12 and both are into main, so #12's head A is listed on #13 too, where it is not the head.
+        # What the gate says on A is about #12. What it says on B is about #13.
+        said = {A: [status("2026-01-15T12:10:00Z", "failure", f"No independent review recorded for {A[:7]}"),
+                    status("2026-01-15T12:16:00Z", "failure", f"Review of {A[:7]} has open findings: fix", ident=2)],
+                B: [status("2026-01-15T12:11:00Z", "failure", f"No independent review recorded for {B[:7]}", ident=3),
+                    status("2026-01-15T12:40:00Z", "success", f"Review record for {B[:7]} says pass", ident=4)]}
+        stack = {12: [commit(A, "2026-01-15T12:00:00Z")], 13: [commit(A, "2026-01-15T12:00:00Z"), commit(B, "2026-01-15T12:01:00Z")]}
+        found = export(FakeGitHub([pull(12), pull(13, head=B)], commits=stack, statuses=said))
+        qa = lambda n: [(e["change"]["commit"][:1], e["type"], e.get("outcome")) for e in found      # noqa: E731
+                        if e["change"]["number"] == n and e.get("station") == "qa"]
+        self.assertEqual(qa(12), [("a", "station.entered", None), ("a", "station.finished", "sent_back")])
+        self.assertEqual(qa(13), [("b", "station.entered", None), ("b", "station.finished", "pass")])
+
+    def test_an_earlier_head_is_read_when_no_other_pull_request_was_open_on_it(self):
+        # A was #12's head before B was pushed. Nothing else listed A then, so what was said on A was about #12.
+        said = {A: [status("2026-01-15T12:10:00Z", "failure", f"Review of {A[:7]} has open findings: fix")],
+                B: [status("2026-01-15T12:40:00Z", "success", f"Review record for {B[:7]} says pass", ident=2)]}
+        own = {12: [commit(A, "2026-01-15T12:00:00Z"), commit(B, "2026-01-15T12:30:00Z")], 13: [commit("c" * 40, "2026-01-15T12:00:00Z")]}
+        gh = FakeGitHub([pull(12, head=B), pull(13, head="c" * 40)], commits=own, statuses=said)
+        self.assertEqual([e.get("outcome") for e in export(gh, numbers=[12]) if e["type"] == "station.finished"], ["sent_back", "pass"])
+        # ...and when another pull request did list A but only opened later, or had closed, A's history is still #12's.
+        later = {**pull(13, head="c" * 40), "created_at": "2026-01-15T12:20:00Z"}
+        own[13] = [commit(A, "2026-01-15T12:00:00Z"), commit("c" * 40, "2026-01-15T12:21:00Z")]
+        gh = FakeGitHub([pull(12, head=B), later], commits=own, statuses=said)
+        self.assertEqual([e.get("outcome") for e in export(gh, numbers=[12]) if e["type"] == "station.finished"], ["sent_back", "pass"])
+        # ...but when it was open at that moment, nobody can say whose head A was, and it is written for neither.
+        gh = FakeGitHub([pull(12, head=B), pull(13, head="c" * 40)], commits=own, statuses=said)
+        found = export(gh)
+        self.assertEqual([(e["change"]["number"], e.get("outcome")) for e in found if e["type"] == "station.finished"], [(12, "pass")])
 
     def test_a_status_that_names_one_of_two_pull_requests_on_a_commit_is_about_that_one(self):
         # With several open pull requests on one head commit, the gate sets one status and names the worst-off first.

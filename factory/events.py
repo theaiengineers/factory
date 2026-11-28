@@ -25,7 +25,8 @@ it. The next export has it.
 Two things are read as they are at the time of the export, and so can differ between two exports of one event: who
 (`actor`), since an account can be renamed, and the link (`evidence`), since a review record can be deleted, after
 which the gate is named in its place, and a repository can be renamed. And a later export can lack events an
-earlier one had: a force-push removes commits, and GitHub keeps only the last time a pull request was closed.
+earlier one had; docs/EVENTS.md lists the ways known (a force-push, an earlier close, commits shared with another
+pull request, a pull request leaving the list that is read).
 
 The review station's name is part of the ids. Rename it in the factory file and the same history comes out as new
 events with new ids, beside the ones an earlier export gave.
@@ -34,6 +35,8 @@ What it cannot see, because GitHub does not keep it or the gate never said it:
   - when a commit was pushed. `change.updated` carries the commit's own date, which the author's machine set;
   - commits that a force-push removed from a pull request, and whatever was decided about them;
   - a review of a commit that was no longer the head when the gate next ran: the gate set no status for it;
+  - which commit was a pull request's head at a given time: so on a commit that is not its head now, and that
+    another open pull request listed at the time, what the gate said is written for neither;
   - who an account is. A person's login may be driven by an agent.
 What the review station decided is read from the statuses the gate set. A status is not signed: anyone who can write to
 the repository can set one under the gate's name, and it will be read as the gate's.
@@ -128,8 +131,9 @@ class Writer:
 
     An event's id comes from `source`: GitHub's own id for the thing the event is made from (a status, a pull
     request's number), with a word for which event of that thing it is. Those ids never change and are never
-    reused, so two statuses in one second are two events, and the same history gives the same id in every export. The pull request's number is part of it too, because two pull
-    requests can share a commit and each then has that commit's events."""
+    reused, so two statuses in one second are two events, and the same history gives the same id in every export.
+    The pull request's number is part of it too: a status on a head commit that two open pull requests share is
+    read for each of them."""
 
     def __init__(self, factory: str, building: str, recorded: str):
         self.base = {"spec": SPEC, "factory": factory, "building": building, "line": None}
@@ -145,17 +149,31 @@ class Writer:
         self.events.append(event)
 
 
+def lifetime(pr: dict) -> tuple[str, str | None]:
+    """(opened, ended): `ended` is when it merged or was last closed, or None while it is open."""
+    return pr.get("created_at") or "", pr.get("merged_at") or (pr.get("closed_at") if pr.get("state") == "closed" else None)
+
+
 def review_events(out: Writer, gh, number: int, sha: str, station: str, context: str, records: list[dict], automatic,
-                  opened: str | None = None, ended: str | None = None) -> None:
+                  opened: str | None = None, ended: str | None = None, is_head: bool = True) -> None:
     """The review station's events for one commit, from the statuses the gate set on it, in the order GitHub gave
     them ids. The gate sets a status each time it runs, so a run of statuses that say the same thing is one event.
 
-    A commit can be on more than one pull request: one closed and opened again as a new one, or one branch built on
-    another. A status belongs to the commit, not to a pull request, so only those set while this pull request was
-    open (from `opened` to `ended`, when it has ended) are read as being about it."""
+    A status belongs to a commit, not to a pull request, and a commit can be on more than one pull request. The gate
+    sets a status on a commit because it is the head of an open pull request, but GitHub does not keep which commit
+    was whose head when. So a status is read as being about this pull request only when that is known:
+
+    - it was set while this pull request was open (from `opened` to `ended`, when it has ended); and
+    - the commit is this pull request's head now, or no other pull request that lists the commit was open at that
+      moment. On a commit that is not its head, and that another open pull request also listed (one branch built
+      on another, both open), the status may have been about either, and is written for neither."""
     statuses = [s for s in gh.pages(f"commits/{sha}/statuses", MAX_STATUSES)
                 if s.get("context") == context and s.get("created_at") and s.get("id") is not None
                 and (not opened or s["created_at"] >= opened) and (not ended or s["created_at"] <= ended)]
+    if statuses and not is_head:
+        others = [lifetime(q) for q in gh.pages(f"commits/{sha}/pulls", 100) if q.get("number") != number]
+        statuses = [s for s in statuses
+                    if not any(start <= s["created_at"] and (not end or s["created_at"] <= end) for start, end in others)]
     last, waiting_for_person = None, False
     for s in sorted(statuses, key=lambda s: (s["created_at"], s["id"])):
         about = shared_with(s.get("description"))[0]
@@ -226,9 +244,9 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
                 records.append({**c, "marker": marker})
     head = (pr.get("head") or {}).get("sha")
     if review_station:
-        ended = pr.get("merged_at") or (pr.get("closed_at") if pr.get("state") == "closed" else None)
+        ended = lifetime(pr)[1]
         for sha in dict.fromkeys([sha for sha, _ in dated] + ([head] if head else [])):
-            review_events(out, gh, number, sha, review_station, context, records, automatic, opened, ended)
+            review_events(out, gh, number, sha, review_station, context, records, automatic, opened, ended, is_head=sha == head)
     if pr.get("merged_at"):
         out.add("change.merged", pr["merged_at"], number, head, ("pull request", number, "merged"), actor=actor_of(pr.get("merged_by")),
                 evidence=link, data={"factory": {"merge_commit": pr.get("merge_commit_sha")}})
