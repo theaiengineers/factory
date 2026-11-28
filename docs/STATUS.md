@@ -27,7 +27,8 @@ Waiting for review (1)
       title: Show the order number on receipts
 
 In the last 7 days
-  6 changes accepted, 4 with no send-back recorded. Typical time from opened to accepted: 40 min.
+  6 changes accepted, 4 with no send-back recorded. Typical time from opened
+    to accepted: 40 min.
   #13: accepted in 25 min.
       title: Faster search
   ...
