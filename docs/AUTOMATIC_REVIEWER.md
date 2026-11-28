@@ -6,6 +6,8 @@ It is optional. A person, or an agent someone starts by hand, can still review a
 
 ## What it does on each pull request
 
+Each record it posts opens with the standard's **In short** block: one plain sentence for each blocking finding, or one saying what the change does when it passes. The words are the model's; when the code overrules a pass, the block says only that a blocking finding was recorded.
+
 1. **Decides whether a review is wanted.** It stops quietly when the pull request is a draft or closed, when the change needs no review, when the head commit already has a record, or when the author cannot write to the repository. That last rule also covers pull requests opened by bots such as Dependabot: a person reviews those, or starts the reviewer by hand.
 2. **Waits for the tests.** It reads the check names under `uses: checks` in `factory.yml` and waits for them to pass on the head commit. If one fails, it does not review; a failing change is the author's to fix first. Every check run and status reported under a required name has to pass. A check GitHub reports as skipped counts as passed, as it does in GitHub's own branch rules.
 3. **Reads the change** through the GitHub API: the diff of every changed file, and each changed file in full where there is room.
