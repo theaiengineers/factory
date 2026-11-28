@@ -116,4 +116,4 @@ It reads events on standard input and says what is wrong with each line against 
 - **Events for the checks station.** A first attempt was reviewed five times and set aside. Each review found another way GitHub's check runs differ from a plain history: a waiting run carries a start time that is later replaced; a run cancelled while waiting keeps it; "Re-run failed jobs" copies the jobs it does not run again, with new ids and old times; and during a re-run a check whose new run has not started still shows its old result. The work is kept on the branch `events/checks-station`.
 - **Somewhere to send them.** The factory file's `events:` key names sinks, and nothing sends to them yet. Run the export where the record is wanted.
 - **A workflow that runs the export for you.**
-- **A dashboard.**
+- **A dashboard.** A plain-words report of where things stand is built on this record: [how is the factory getting on?](STATUS.md)

@@ -16,6 +16,8 @@ The automatic reviewer. An optional station that does the review: when a change'
 
 The record of every step. One command writes out what happened to each change (opened, reviewed, sent back, a person needed, merged) as events, from what GitHub already holds. Test results are not in it yet. See [docs/EVENTS.md](docs/EVENTS.md).
 
+How the factory is getting on. One command says, in plain words, what is waiting for review, what was sent back and why, and what was accepted lately; an agent can run it to answer the question. See [docs/STATUS.md](docs/STATUS.md).
+
 ## Setting it up
 
 Most people will set this up with an agent. Two guides are written for that, and a person can follow them too:
