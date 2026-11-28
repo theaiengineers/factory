@@ -6,7 +6,7 @@ For a change's own life and for the independent review, nothing new has to be st
 
 That has three consequences worth knowing:
 
-- **It can be made again at any time.** Lose the file and it can be written out again, apart from the few things GitHub itself stops keeping (see the limits below).
+- **It can be made again at any time.** Lose the file and it can be written out again, apart from the few things GitHub itself stops keeping and the review events of a replaced commit that nobody reviewed (see "What stays the same between exports" and "What it cannot tell you" below).
 - **It covers the past.** A repository that adopts the factory today can write out the record of last month's pull requests.
 - **It needs no secret of its own.** A token that can read the repository is enough.
 
@@ -35,15 +35,15 @@ It reads `factory.yml` from the default branch for the review station's name, th
 
 Every event's `id` is worked out from GitHub's own id for the thing the event is made from: a status, or a pull request. Those never change and are never used twice. What an event says happened (its type, time, change, station, outcome and reason) is fixed with it, and nothing that can be edited afterwards is carried, so a pull request's title and base branch are not in the record; a reader that wants them asks GitHub by the pull request's number. Export twice and the same events come out with the same ids, so a reader that keeps one event for each id can be fed overlapping exports.
 
-Nothing from the last minute is written, by the clock of the machine running the export. A second that is still going on has not shown everything that happens in it. The next export has what was held back.
+Nothing from the last minute is written, by the clock of the machine running the export. A second that is still going on has not shown everything that happens in it. The next export has what was held back, provided it reads that pull request. `--since` goes by the time GitHub last counted the pull request as updated, which can be a few seconds before the gate's status or a merge was written. Do not use `--since` as a "since my last export" marker set to the time of that export: an event held back then can be skipped for good. Overlap generously (an hour is plenty) and keep one event for each id, or use `--limit`.
 
-Two fields are read as they are at the time of the export and can differ between two exports of the same event: `actor`, because an account can be renamed, and `evidence`, because a review record can be deleted (the gate is then named in its place) and every address changes if the repository is renamed or moved. `check` reports such a pair as an id used for two different events, which is what it is.
+Three fields are read as they are at the time of the export and can differ between two exports of the same event: `factory`, which is the factory file's name for the group of repositories and can be edited there; `actor`, because an account can be renamed; and `evidence`, because a review record can be deleted (the gate is then named in its place) and every address changes if the repository is renamed or moved. `check` reports such a pair as an id used for two different events, which is what it is.
 
 A later export can also gain events dated before ones it already gave, when a review record is posted for an earlier commit. Read by id, not by time.
 
-A later export can lack events an earlier one had. The ways known: a force-push removes commits from a pull request; GitHub keeps only the last time a pull request was closed, so an earlier close of one that was reopened is gone; a deleted or edited review record takes with it the events of an earlier commit it was the only review of; a pull request that shares commits with another can stop listing them once the other has merged; and, when exporting the most recent pull requests and not named ones, a pull request can leave the list by falling outside `--limit` or being pointed at another branch.
+A later export can lack events an earlier one had. The ways known: a head commit that nobody reviewed stops being read once a new commit replaces it, so the wait recorded on it is in an export taken then and not in one taken after; a force-push removes commits from a pull request; GitHub keeps only the last time a pull request was closed, so an earlier close of one that was reopened is gone; a deleted or edited review record takes with it the events of an earlier commit it was the only review of; a pull request that shares commits with another can stop listing them once the other has merged; and, when exporting the most recent pull requests and not named ones, a pull request can leave the list by falling outside `--limit` or being pointed at another branch.
 
-The review station's name and the factory file's `building` (the repository's name, when the file gives none) are part of the ids. If either is changed, the same history comes out as new events with new ids, beside the ones an earlier export gave.
+The review station's name and the factory file's `building` (the repository's name as given in `GITHUB_REPOSITORY`, letter for letter, when the file gives none) are part of the ids. If either is changed, the same history comes out as new events with new ids, beside the ones an earlier export gave.
 
 Events come out in order of time. Events of the same second on one commit keep the order in which GitHub recorded the statuses they are made from.
 
@@ -52,7 +52,7 @@ Events come out in order of time. Events of the same second on one commit keep t
 | Event | Made from | Its time |
 |---|---|---|
 | `change.opened` | The pull request | When it was opened |
-| `change.updated` | Each commit on the pull request whose own date is after the pull request was opened | The commit's own date (see the limits) |
+| `change.updated` | Each commit on the pull request whose own date is after the pull request was opened | The commit's own date (see "What it cannot tell you") |
 | `station.entered`, review | A gate status on a commit that says a review is awaited, when the one before it said something else | When the gate set it |
 | `station.finished`, review | A gate status that says pass (`pass`), open findings (`sent_back`), no review needed (`skipped`), or could not decide (`error`) | When the gate set it |
 | `action.needed` | A gate status that says the automatic review passed and a person's review is also needed | When the gate set it |
@@ -62,7 +62,7 @@ Events come out in order of time. Events of the same second on one commit keep t
 
 The gate sets a status every time it runs. Several in a row that say the same thing are one event, so two findings records on one commit with nothing else between them are one `sent_back`.
 
-A status in words the gate does not use becomes a `station.finished` with `pass` when its state is success, and a `station.entered` otherwise, and is marked (see the limits).
+A status in words the gate does not use becomes a `station.finished` with `pass` when its state is success, and a `station.entered` otherwise, and is marked (see "What it cannot tell you").
 
 ## Which statuses are read for a pull request
 
@@ -75,7 +75,7 @@ What this leaves out, and where it can still be wrong:
 
 - **An earlier head that nobody reviewed.** It has no review record, so nothing shows it was the head, and whatever the gate said on it leaves no event: the wait for a review, a "no review needed", an error, or a status in other words. A send-back or a pass comes from a review record, so those are kept for as long as the record is there.
 - **An earlier head whose review record was deleted, or edited so that its first line is no longer a marker,** stops being read, and its events are not in later exports.
-- **A review posted on the wrong pull request.** If anyone posts a review record on a pull request for a commit that is on its list but was only ever another pull request's head, that commit is read for it. On a public repository anyone can comment, so in a stack a passer-by can cause the lower pull request's review events to be written for the upper one as well. It changes nothing but this record: the gate does not count a passer-by's record.
+- **A review posted on the wrong pull request.** If anyone posts a review record on a pull request for a commit that is on its list but was only ever another pull request's head, that commit is read for it. On a public repository anyone can comment, so in a stack a passer-by can cause the lower pull request's review events to be written for the upper one as well. If that record is posted before the lower pull request's real review, its author is also named as the reviewer on the upper one's copy of the result. A passer-by cannot bring in a commit that is not on the pull request's list, cannot change an event's type, time, commit or outcome, and cannot touch a pull request that shares no commits with another. It changes nothing but this record: the gate does not count a passer-by's record.
 - **A commit that became the head later.** Statuses set on it while the pull request was open, but before it became this pull request's head, are read for it.
 - **Reopened after a successor.** If a pull request is closed, another is opened from the same head commit, and the first is later reopened, the first is read as open for the whole time and picks up what was said about the second while it was closed.
 - **The same second.** A status set in the very second a pull request opened, merged or closed counts as inside its life, and so can be read for two pull requests on one head commit.
@@ -93,7 +93,7 @@ When several open pull requests have the same head commit at the same time, the 
 - **Commits a force-push removed.** They are no longer listed on the pull request, so neither they nor what was decided about them appear.
 - **A review of a commit that had already been replaced.** The review station's events come from the statuses the gate set. If a new commit arrived before the gate next ran, the gate never set a status for the review of the old one, and that review, a send-back included, leaves no event. The count of send-backs here can therefore be lower than the count of findings records on the pull requests.
 - **That an action or a wait ended, when the commit was replaced.** An `action.needed` or a review `station.entered` on a commit is closed only by a later status on the same commit. When a new commit takes over, nothing closes the old one; read a later `change.updated`, `change.merged` or `change.closed` as ending it.
-- **Which record the gate counted.** The reviewer named on a `pass` or `sent_back` is the author of the newest record with that verdict posted before the gate's status. A record from an account the gate does not count, posted in the few seconds between the real record and the gate's status, would be named in its place.
+- **Which record the gate counted.** The reviewer named on a `pass` or `sent_back` is the author of the newest record with that verdict posted before the gate's status. A record from an account the gate does not count, posted between the real record and the gate's status, would be named in its place. That gap is usually a few seconds; it is longer when the gate's answer goes away and comes back (findings, then an error, then findings again), because the later status is the one read.
 - **Who an account is.** `person` means an account that is not a bot. An agent working through a person's login looks the same.
 - **That a status is the gate's.** A status is not signed. Anyone who can write to the repository can set one under the gate's name. A status in the gate's words is read as the gate's. A status in other words, in any state, on a commit that is read is still recorded, because it decides whether the pull request can merge, and it is marked: `reason.code` is `review.status_unrecognised` and `data.factory.unrecognised_status` is true. A gate status set at a time when the factory file had no review station is read the same way.
 - **What the factory file said in the past.** The review station's name and the automatic reviewer are read as they are now, and applied to the whole history. If the automatic reviewer is no longer named, its past records are shown as a bot's (`system`), not an agent's.
