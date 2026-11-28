@@ -145,11 +145,17 @@ class Writer:
         self.events.append(event)
 
 
-def review_events(out: Writer, gh, number: int, sha: str, station: str, context: str, records: list[dict], automatic) -> None:
+def review_events(out: Writer, gh, number: int, sha: str, station: str, context: str, records: list[dict], automatic,
+                  opened: str | None = None, ended: str | None = None) -> None:
     """The review station's events for one commit, from the statuses the gate set on it, in the order GitHub gave
-    them ids. The gate sets a status each time it runs, so a run of statuses that say the same thing is one event."""
+    them ids. The gate sets a status each time it runs, so a run of statuses that say the same thing is one event.
+
+    A commit can be on more than one pull request: one closed and opened again as a new one, or one branch built on
+    another. A status belongs to the commit, not to a pull request, so only those set while this pull request was
+    open (from `opened` to `ended`, when it has ended) are read as being about it."""
     statuses = [s for s in gh.pages(f"commits/{sha}/statuses", MAX_STATUSES)
-                if s.get("context") == context and s.get("created_at") and s.get("id") is not None]
+                if s.get("context") == context and s.get("created_at") and s.get("id") is not None
+                and (not opened or s["created_at"] >= opened) and (not ended or s["created_at"] <= ended)]
     last, waiting_for_person = None, False
     for s in sorted(statuses, key=lambda s: (s["created_at"], s["id"])):
         about = shared_with(s.get("description"))[0]
@@ -220,8 +226,9 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
                 records.append({**c, "marker": marker})
     head = (pr.get("head") or {}).get("sha")
     if review_station:
+        ended = pr.get("merged_at") or (pr.get("closed_at") if pr.get("state") == "closed" else None)
         for sha in dict.fromkeys([sha for sha, _ in dated] + ([head] if head else [])):
-            review_events(out, gh, number, sha, review_station, context, records, automatic)
+            review_events(out, gh, number, sha, review_station, context, records, automatic, opened, ended)
     if pr.get("merged_at"):
         out.add("change.merged", pr["merged_at"], number, head, ("pull request", number, "merged"), actor=actor_of(pr.get("merged_by")),
                 evidence=link, data={"factory": {"merge_commit": pr.get("merge_commit_sha")}})

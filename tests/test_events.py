@@ -9,7 +9,7 @@ from unittest import mock
 
 from factory import config, events, review_gate, risk
 
-A, B, C = "a" * 40, "b" * 40, "c" * 40
+A, B = "a" * 40, "b" * 40
 BOT = "github-actions[bot]"
 RECORDED = "2026-02-01T00:00:00Z"
 RULES = """
@@ -38,12 +38,6 @@ def commit(sha, date):
     return {"sha": sha, "commit": {"committer": {"date": date}}}
 
 
-def run(name, started, completed=None, conclusion="success", suite=1, ident=1):
-    return {"id": ident, "name": name, "started_at": started, "completed_at": completed, "check_suite": {"id": suite},
-            "status": "completed" if completed else "in_progress", "conclusion": conclusion if completed else None,
-            "html_url": f"https://github.test/runs/{ident}"}
-
-
 def status(when, state, description, context="independent-review", ident=1, creator=BOT):
     return {"id": ident, "created_at": when, "state": state, "description": description, "context": context,
             "target_url": "https://github.test/gate-run", "creator": {"login": creator, "type": "Bot" if creator.endswith("[bot]") else "User"}}
@@ -64,9 +58,9 @@ def pull(number=12, state="open", merged_at=None, closed_at=None, head=A, base="
 class FakeGitHub:
     repo = "example/shop"
 
-    def __init__(self, prs=(), commits=None, runs=None, statuses=None, comments=None):
+    def __init__(self, prs=(), commits=None, statuses=None, comments=None):
         self.prs = {p["number"]: p for p in prs}
-        self.commits, self.runs, self.statuses, self.comments = commits or {}, runs or {}, statuses or {}, comments or {}
+        self.commits, self.statuses, self.comments = commits or {}, statuses or {}, comments or {}
         self.asked = []
 
     def get(self, path):
@@ -77,8 +71,6 @@ class FakeGitHub:
             return [{k: v for k, v in p.items() if k != "merged_by"} for p in ordered[(page - 1) * 100:page * 100]]
         if path.startswith("pulls/"):
             return self.prs[int(path.split("/")[1])]
-        if "/check-runs" in path:
-            return {"check_runs": self.runs.get(path.split("/")[1], [])}
         raise AssertionError(path)
 
     def pages(self, path, limit):
@@ -240,6 +232,26 @@ class OneChange(unittest.TestCase):
         self.assertEqual(len(per[12]), 2)
         self.assertEqual(len({e["id"] for e in found}), len(found))
 
+    def test_a_commit_on_two_pull_requests_gives_each_only_what_happened_while_it_was_open(self):
+        # #12 is sent back and closed; #13 is then opened from the same commit and passes.
+        said = {A: [status("2026-01-15T12:10:00Z", "failure", f"No independent review recorded for {A[:7]}"),
+                    status("2026-01-15T12:16:00Z", "failure", f"Review of {A[:7]} has open findings: fix", ident=2),
+                    status("2026-01-15T12:26:00Z", "failure", f"No independent review recorded for {A[:7]}", ident=3),
+                    status("2026-01-15T12:40:00Z", "success", f"Review record for {A[:7]} says pass", ident=4)]}
+        first = pull(12, state="closed", closed_at="2026-01-15T12:20:00Z")
+        second = {**pull(13), "created_at": "2026-01-15T12:25:00Z"}
+        found = export(FakeGitHub([first, second], statuses=said))
+        qa = lambda n: [(e["time"][11:16], e["type"], e.get("outcome")) for e in found      # noqa: E731
+                        if e["change"]["number"] == n and e.get("station") == "qa"]
+        self.assertEqual(qa(12), [("12:10", "station.entered", None), ("12:16", "station.finished", "sent_back")])
+        self.assertEqual(qa(13), [("12:26", "station.entered", None), ("12:40", "station.finished", "pass")])
+        for n, opened in ((12, "2026-01-15T12:05:07Z"), (13, "2026-01-15T12:25:00Z")):
+            self.assertTrue(all(e["time"] >= opened for e in found if e["change"]["number"] == n))
+        # A merged pull request takes nothing set after it merged, and the second it merged in is its own.
+        merged = pull(12, state="closed", merged_at="2026-01-15T12:16:00Z", closed_at="2026-01-15T12:16:00Z")
+        self.assertEqual([(e["type"], e.get("outcome")) for e in export(FakeGitHub([merged], statuses=said), numbers=[12]) if e.get("station") == "qa"],
+                         [("station.entered", None), ("station.finished", "sent_back")])
+
     def test_a_status_that_names_one_of_two_pull_requests_on_a_commit_is_about_that_one(self):
         # With several open pull requests on one head commit, the gate sets one status and names the worst-off first.
         shared = {A: [status("2026-01-15T12:06:00Z", "failure", f"#12 into main: No independent review recorded for {A[:7]} (code change, not high risk)"),
@@ -332,12 +344,13 @@ class Settled(unittest.TestCase):
     def test_an_earlier_export_is_always_inside_a_later_one(self):
         # Generated histories of gate statuses, several to a second, exported at every second along the way.
         rng = random.Random(11)
-        second = lambda n: f"2026-01-15T12:{n // 60:02d}:{n % 60:02d}Z"      # noqa: E731
+        second = lambda n: f"2026-01-15T12:{10 + n // 60:02d}:{n % 60:02d}Z"      # noqa: E731   (after the pull request opened)
         words = [("failure", f"No independent review recorded for {A[:7]}"), ("failure", f"Review of {A[:7]} has open findings: fix"),
                  ("success", f"Review record for {A[:7]} says pass"), ("failure", f"Automatic review passed {A[:7]}; this change also needs a person's review"),
                  ("success", "No code changed: no independent review needed"), ("error", "Gate could not decide: x"), ("success", "By hand"),
                  ("failure", "By hand"), ("pending", "Hm"), ("failure", f"#12 into main: Review of {A[:7]} has open findings: fix"),
                  ("failure", f"#13 into main: No independent review recorded for {A[:7]}")]
+        written = 0
         for _ in range(300):
             when, history = 6, []
             for ident in range(1, rng.randint(2, 12)):
@@ -355,7 +368,9 @@ class Settled(unittest.TestCase):
                     self.assertEqual(now.get(ident), event, (history, moment))
                 self.assertEqual([e["time"] for e in found], sorted(e["time"] for e in found))
                 earlier = now
+            written += len(earlier) - 1
             self.assertEqual(events.check_lines(json.dumps(e) for e in earlier.values())[1], [])
+        self.assertGreater(written, 600)                             # the statuses were read: far more than the openings
 
 
 class Listing(unittest.TestCase):
