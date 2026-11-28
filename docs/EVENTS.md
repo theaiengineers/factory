@@ -29,7 +29,7 @@ python3 -m factory.events export --limit 30 > events.jsonl
 | `--pr N` | One pull request. May be given more than once |
 | `--context NAME` | The name of the gate's status, if yours is not `independent-review` |
 
-It reads `factory.yml` from the default branch for the review station's name, the automatic reviewer and the branch. When the factory file names a `branch`, only pull requests into it are read; with `--pr` the named pull requests are read whatever branch they are into. It makes a few requests for each pull request and one for each commit, so a large export takes a while and counts against the token's hourly limit.
+It reads `factory.yml` from the default branch for the review station's name, the automatic reviewer and the branch. When the factory file names a `branch`, only pull requests into it are read; with `--pr` the named pull requests are read whatever branch they are into. It makes a few requests for each pull request and one for each commit it reads statuses on (the head, and each earlier commit a review names), so a large export takes a while and counts against the token's hourly limit.
 
 ## What stays the same between exports, and what does not
 
@@ -39,7 +39,7 @@ Nothing from the last minute is written, by the clock of the machine running the
 
 Two fields are read as they are at the time of the export and can differ between two exports of the same event: `actor`, because an account can be renamed, and `evidence`, because a review record can be deleted (the gate is then named in its place) and every address changes if the repository is renamed or moved. `check` reports such a pair as an id used for two different events, which is what it is.
 
-A later export can lack events an earlier one had. The ways known: a force-push removes commits from a pull request; GitHub keeps only the last time a pull request was closed, so an earlier close of one that was reopened is gone; a pull request that shares commits with another can stop listing them once the other has merged, and events on a shared commit can stop being written once another pull request is found to have been open on it; and, when exporting the most recent pull requests and not named ones, a pull request can leave the list by falling outside `--limit` or being pointed at another branch.
+A later export can lack events an earlier one had. The ways known: a force-push removes commits from a pull request; GitHub keeps only the last time a pull request was closed, so an earlier close of one that was reopened is gone; a deleted review record takes with it the events of an earlier commit it was the only review of; a pull request that shares commits with another can stop listing them once the other has merged; and, when exporting the most recent pull requests and not named ones, a pull request can leave the list by falling outside `--limit` or being pointed at another branch.
 
 The review station's name and the factory file's `building` (the repository's name, when the file gives none) are part of the ids. If either is changed, the same history comes out as new events with new ids, beside the ones an earlier export gave.
 
@@ -62,23 +62,22 @@ The gate sets a status every time it runs. Several in a row that say the same th
 
 A status in words the gate does not use becomes a `station.finished` with `pass` when its state is success, and a `station.entered` otherwise, and is marked (see the limits).
 
-A status belongs to a commit, and a commit can be on more than one pull request: one closed and opened again as a new pull request, or one branch built on another with both into the same branch. The gate sets a status on a commit because it is the head of an open pull request, but GitHub does not keep which commit was whose head when. So a status is read as being about a pull request only when that is known:
+## Which statuses are read for a pull request
 
-- it was set while the pull request was open, from when it was opened to when it merged or was last closed; and
-- the commit is the pull request's head now, or no other pull request that lists the commit was open at that moment.
+A status belongs to a commit, and a commit can be on more than one pull request: one closed and opened again as a new pull request, or one branch built on another with both into the same branch. The gate sets a status on a commit because it is the head of an open pull request, but GitHub does not keep which commit was whose head when, and its list of the pull requests a commit is on leaves many out. So a status is read as being about a pull request only when two things are known:
 
-This leaves gaps, stated here so that nothing false is written:
+- **The commit was this pull request's head.** It is the head now, or a review record posted on this pull request names it. A comment belongs to one pull request, so that link is certain. Other commits on the pull request's list are not read at all.
+- **The pull request was open when the status was set,** from when it was opened to when it merged or was last closed.
 
-- **A stack that is open together.** On a commit that is not a pull request's head now, and that another open pull request also listed at the time, the status could have been about either, and is written for neither. The lower pull request of a stack keeps everything said about its present head, and loses what was said about its earlier heads while the upper one was open. The upper one has only what was said about its own commits.
+What this leaves out, and where it can still be wrong:
+
+- **An earlier head that nobody reviewed.** It has no review record, so nothing shows it was the head, and the wait for a review on it (and a "no review needed" on it) leaves no event. Every send-back and pass has a record, so those are kept.
+- **An earlier head whose review record was deleted** stops being read.
+- **A review posted on the wrong pull request.** If someone posts a review record on a pull request for a commit that is on its list but was only ever another pull request's head, that commit is read for it.
+- **A commit that became the head later.** Statuses set on it while the pull request was open, but before it became this pull request's head, are read for it.
 - **Reopened after a successor.** If a pull request is closed, another is opened from the same head commit, and the first is later reopened, the first is read as open for the whole time and picks up what was said about the second while it was closed.
-- **The same second.** A status set in the very second a pull request opened, merged or closed counts as inside its life, and so can be read for two pull requests on one commit.
+- **The same second.** A status set in the very second a pull request opened, merged or closed counts as inside its life, and so can be read for two pull requests on one head commit.
 - **Just after the end.** A status the gate set a moment after a pull request closed or merged is not read for it.
-
-On a review's `pass` or `sent_back`, `actor` and `evidence` are the author and address of the newest review record for that commit with that verdict, posted before the gate's status. When there is none, they are the gate and its run.
-
-`actor.kind` is `agent` for the automatic reviewer the factory file names, `system` for any other bot and for the gate, and `person` for any other account.
-
-Reason codes the factory writes: `review.findings`, `review.not_needed`, `review.person_needed`, `review.error`, `review.status_unrecognised`. The sentence beside each code is fixed in the code.
 
 When several open pull requests have the same head commit at the same time, the gate sets one status for the commit, for whichever of them is worst off, and names that pull request at the front. Such a status is read as being about the pull request it names and no other. This leaves three gaps, all on a shared head commit only:
 
