@@ -150,6 +150,18 @@ class Writer:
         self.events.append(event)
 
 
+def may_review(comment: dict, automatic: dict | None) -> bool:
+    """Whether a review record is from an account that belongs to the repository: its owner, a member of its
+    organisation, a collaborator, or the automatic reviewer the factory file names. Anyone can comment on a public
+    pull request, and a record decides which commits are read for it and who is named as the reviewer, so a
+    passer-by's does not count. (The gate is stricter: it looks up what the account may do. That lookup is not
+    repeated here, so a record the gate would not count can still be read.)"""
+    user = comment.get("user") or {}
+    if automatic and user.get("login") == automatic.get("account") and user.get("type") == "Bot":
+        return True
+    return comment.get("author_association") in ("OWNER", "MEMBER", "COLLABORATOR")
+
+
 def lifetime(pr: dict) -> tuple[str, str | None]:
     """(opened, ended): `ended` is when it merged or was last closed, or None while it is open."""
     return pr.get("created_at") or "", pr.get("merged_at") or (pr.get("closed_at") if pr.get("state") == "closed" else None)
@@ -232,7 +244,7 @@ def pull_request_events(out: Writer, gh, pr: dict, cfg: dict, context: str) -> N
     if review_station:
         for c in gh.pages(f"issues/{number}/comments", MAX_COMMENTS):
             marker = review_gate.parse_marker(c.get("body"))
-            if marker:
+            if marker and may_review(c, automatic):
                 records.append({**c, "marker": marker})
     head = (pr.get("head") or {}).get("sha")
     if review_station:
